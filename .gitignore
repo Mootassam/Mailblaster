@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Build output
+build/
+dist/
+installer_output/
+MailBlaster-Portable/
+*.zip
+
+# Local data — contacts, SMTP passwords, logs (never commit)
+*.db
+*.db-wal
+*.db-shm
+*.log
+.env
+
+# Downloaded tools (cloudflared)
+bin/

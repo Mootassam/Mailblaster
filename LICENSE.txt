@@ -1,0 +1,32 @@
+MAILBLASTER — END USER LICENSE AGREEMENT AND TERMS OF USE
+
+By installing or using MailBlaster ("the Software") you agree to these terms.
+
+1. LICENSE. You are granted a personal, non-exclusive license to install and use
+   the Software on computers you own or control, for personal or internal
+   business purposes.
+
+2. LOCAL PROCESSING. The Software runs on your own computer. Your contacts,
+   campaigns and logs are stored locally. Email is sent through the third-party
+   email accounts (SMTP/ESP) that YOU connect; the Software does not relay mail
+   itself and does not upload your data.
+
+3. RESPONSIBLE & LAWFUL USE. You are solely responsible for the email you send.
+   You agree to send only to recipients you are permitted to contact, to comply
+   with all applicable laws (including anti-spam laws such as CAN-SPAM, GDPR/
+   ePrivacy and local regulations), to honor unsubscribe requests, to include
+   accurate sender information and a valid unsubscribe method, and to comply with
+   the acceptable-use policies of any email provider you connect. Do not use the
+   Software to send unsolicited bulk email in violation of those rules.
+
+4. NO WARRANTY. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+   YOU USE IT AT YOUR OWN RISK. Deliverability, provider limits, and account
+   standing depend on your own sending practices and your email providers.
+
+5. LIMITATION OF LIABILITY. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE AUTHORS
+   SHALL NOT BE LIABLE FOR ANY DAMAGES ARISING FROM USE OR INABILITY TO USE THE
+   SOFTWARE, INCLUDING BLOCKED ACCOUNTS, BLACKLISTING, OR LOST DATA.
+
+6. THIRD-PARTY COMPONENTS remain under their own licenses.
+
+By clicking "I accept", you acknowledge you have read and agree to these terms.

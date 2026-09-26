@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MailBlaster</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side" id="side">
+    <div class="brand"><span class="logo"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></span><span>MailBlaster</span></div>
+    <nav id="nav"></nav>
+    <div class="side-foot">
+      <div class="sync-line" id="syncLine"></div>
+      <div class="local"><span class="dot g"></span> 100% local · your data stays on this PC</div>
+    </div>
+  </aside>
+  <div class="backdrop" id="backdrop"></div>
+  <main class="main">
+    <header class="top">
+      <button class="icon-btn hamb" id="hamb" aria-label="Menu"></button>
+      <div class="ttl"><h1 id="ttl">Dashboard</h1><div class="sub" id="tsub"></div></div>
+      <div class="top-right" id="topright"></div>
+    </header>
+    <div class="content" id="view"></div>
+  </main>
+</div>
+<div id="modalRoot"></div>
+<div id="toasts"></div>
+<div id="menuRoot"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
