@@ -355,3 +355,12 @@ table.t .w-cb{width:42px;padding-right:0}
   .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:35;display:none}.backdrop.show{display:block}.steps{flex-direction:column}.review{grid-template-columns:1fr}}
 
 @media(max-width:860px){.top{flex-wrap:wrap}.top .sub{display:none}.split,.grid.g2{grid-template-columns:minmax(0,1fr)}}
+/* delete controls */
+.ib-cb{margin:9px 0 0;flex:none;width:15px;height:15px;cursor:pointer;accent-color:var(--brand)}
+.ib-bulk{margin-top:8px;gap:8px}
+.tpl .del{position:absolute;top:8px;right:8px;z-index:2;opacity:0;transition:.15s;background:#fff;box-shadow:var(--shadow)}
+.tpl:hover .del,.tpl .del:focus{opacity:1}
+.tpl .del:hover{color:var(--red-d)}
+@media(hover:none){.tpl .del{opacity:1}}
+.danger-row{display:flex;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid var(--line)}
+.danger-row:last-child{border-bottom:0}

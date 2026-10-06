@@ -102,6 +102,10 @@ def init():
                 source TEXT, ts REAL);
             CREATE TABLE IF NOT EXISTS suppression(
                 email TEXT PRIMARY KEY, reason TEXT, ts REAL);
+            CREATE TABLE IF NOT EXISTS templates(
+                id INTEGER PRIMARY KEY, name TEXT, category TEXT DEFAULT 'My templates',
+                subject TEXT DEFAULT '', html TEXT DEFAULT '', text TEXT DEFAULT '',
+                created_at REAL);
         """)
         _add_cols(c, "contacts", [("replied_at", "REAL DEFAULT 0"),
                                   ("soft_bounces", "INTEGER DEFAULT 0"),
@@ -163,6 +167,34 @@ def save_settings(d):
         for k, v in d.items():
             c.execute("INSERT INTO settings(key,value) VALUES(?,?) "
                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, str(v)))
+
+
+# --------------------------- my templates ----------------------------------- #
+def user_templates():
+    with _LOCK, _conn() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM templates ORDER BY created_at DESC")]
+
+
+def save_template(name, subject, html, text=""):
+    with _LOCK, _conn() as c:
+        return c.execute("INSERT INTO templates(name,subject,html,text,created_at) VALUES(?,?,?,?,?)",
+                         (name, subject, html, text, time.time())).lastrowid
+
+
+def delete_template(tid):
+    with _LOCK, _conn() as c:
+        return c.execute("DELETE FROM templates WHERE id=?", (tid,)).rowcount
+
+
+def hidden_templates():
+    try:
+        return set(json.loads(get_settings().get("hidden_templates") or "[]"))
+    except Exception:
+        return set()
+
+
+def set_hidden_templates(ids):
+    save_settings({"hidden_templates": json.dumps(sorted(ids))})
 
 
 # --------------------------- sender accounts -------------------------------- #
@@ -820,6 +852,21 @@ def recent_bounces(limit=100, q=""):
             f"{w} ORDER BY b.ts DESC LIMIT ?", args + [limit])]
 
 
+def bounces_delete(ids):
+    """Remove entries from the bounce log. The addresses stay suppressed."""
+    ids = [int(i) for i in ids or []]
+    if not ids:
+        return 0
+    with _LOCK, _conn() as c:
+        return c.execute(f"DELETE FROM bounces WHERE id IN ({','.join('?' * len(ids))})",
+                         ids).rowcount
+
+
+def bounces_clear():
+    with _LOCK, _conn() as c:
+        return c.execute("DELETE FROM bounces").rowcount
+
+
 def deliverability_stats(days=30):
     since = time.time() - days * 86400
     with _LOCK, _conn() as c:
@@ -930,6 +977,32 @@ def inbox_update(iid, **kw):
         with _LOCK, _conn() as c:
             c.execute(f"UPDATE inbox SET {','.join(k + '=?' for k in kw)} WHERE id=?",
                       list(kw.values()) + [iid])
+
+
+def inbox_delete(ids):
+    """Delete messages from MailBlaster's inbox (the copy in your mailbox is never touched)."""
+    ids = [int(i) for i in ids or []]
+    if not ids:
+        return 0
+    with _LOCK, _conn() as c:
+        n = 0
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            n += c.execute(f"DELETE FROM inbox WHERE id IN ({','.join('?' * len(chunk))})",
+                           chunk).rowcount
+    return n
+
+
+def inbox_delete_box(box="", q=""):
+    w, args = _inbox_where(box, q)
+    with _LOCK, _conn() as c:
+        return c.execute(f"DELETE FROM inbox WHERE id IN (SELECT i.id FROM inbox i WHERE {w})",
+                         args).rowcount
+
+
+def inbox_delete_all():
+    with _LOCK, _conn() as c:
+        return c.execute("DELETE FROM inbox").rowcount
 
 
 def inbox_mark_all_read():
@@ -1054,11 +1127,31 @@ def set_campaign_field(cid, **kw):
                   list(kw.values()) + [cid])
 
 
-def delete_campaign(cid):
+def campaign_family(cid):
+    """The campaign id plus the ids of its follow-up steps."""
     with _LOCK, _conn() as c:
-        kids = [r[0] for r in c.execute("SELECT id FROM campaigns WHERE parent_id=?", (cid,))]
-        for x in kids + [cid]:
+        return [cid] + [r[0] for r in c.execute("SELECT id FROM campaigns WHERE parent_id=?", (cid,))]
+
+
+def delete_campaign(cid):
+    """Delete a campaign, its follow-up steps and their send log + open/click stats.
+    Bounces and the suppression list are kept so bad/unsubscribed addresses stay blocked."""
+    ids = campaign_family(cid)
+    with _LOCK, _conn() as c:
+        for x in ids:
             c.execute("DELETE FROM campaigns WHERE id=?", (x,))
+            c.execute("DELETE FROM sends WHERE campaign_id=?", (x,))
+            c.execute("DELETE FROM events WHERE campaign_id=?", (x,))
+    return len(ids)
+
+
+def delete_all_campaigns():
+    with _LOCK, _conn() as c:
+        n = c.execute("SELECT COUNT(*) FROM campaigns WHERE parent_id=0").fetchone()[0]
+        c.execute("DELETE FROM campaigns")
+        c.execute("DELETE FROM sends")
+        c.execute("DELETE FROM events")
+    return n
 
 
 def due_campaigns():

@@ -18,3 +18,8 @@ MailBlaster-Portable/
 
 # Downloaded tools (cloudflared)
 bin/
+
+# Embedded-runtime build (build.ps1)
+build_embed/
+build_cache/
+port.txt

@@ -435,25 +435,40 @@ async function viewCampaigns() {
   const cat = c => { const s = liveStatus(c); if (['running', 'queued', 'scheduled', 'paused', 'waiting', 'braked'].includes(s)) return 'active'; if (s === 'done') return 'done'; if (['interrupted', 'stopped', 'error'].includes(s)) return 'attention'; return 'other'; };
   const counts = { all: camps.length }; camps.forEach(c => counts[cat(c)] = (counts[cat(c)] || 0) + 1);
   const listCard = h('div', { class: 'card' });
+  const sel = new Set();
+  const isRunning = c => ['running', 'paused', 'waiting', 'braked'].includes(liveStatus(c));
   const renderList = () => {
     const rows = camps.filter(c => CAMP_TAB === 'all' || cat(c) === CAMP_TAB);
+    [...sel].forEach(id => { if (!rows.some(c => c.id === id)) sel.delete(id); });
     const tabs = h('div', { class: 'tabs' }, CAMP_TABS.map(([k, l]) => h('button', { class: CAMP_TAB === k ? 'on' : '', onclick: () => { CAMP_TAB = k; renderList(); } }, l, h('span', { class: 'c' }, counts[k] || 0))));
     let body;
     if (!camps.length) body = emptyState('send', 'No campaigns yet', 'Pick a contact group, write your email (or start from a template), choose your senders and launch. Safety brakes watch every send.', btn('Create your first campaign', { kind: 'primary', icon: 'plus', onclick: () => newCampaign() }));
     else if (!rows.length) body = h('div', { class: 'empty', style: 'padding:30px' }, 'Nothing here.');
-    else body = h('div', { class: 'tbl-wrap' }, h('table', { class: 't' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Campaign'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Sent'), h('th', { class: 'num' }, 'Opens'), h('th', { class: 'num' }, 'Clicks'), h('th', { class: 'num' }, 'Replies'), h('th', { class: 'num' }, 'Bounced'), h('th', {}, ''))),
+    else {
+      const deletable = rows.filter(c => !isRunning(c)), allOn = deletable.length > 0 && deletable.every(c => sel.has(c.id));
+      const hcb = h('input', { type: 'checkbox', title: 'Select all', checked: allOn, disabled: !deletable.length });
+      hcb.indeterminate = !allOn && sel.size > 0;
+      hcb.addEventListener('change', () => { if (hcb.checked) deletable.forEach(c => sel.add(c.id)); else sel.clear(); renderList(); });
+      body = h('div', {}, sel.size ? h('div', { class: 'bulkbar' }, h('b', {}, `${fmt(sel.size)} selected`), h('span', { class: 'spacer' }),
+        btn('Clear selection', { size: 'sm', kind: 'quiet', onclick: () => { sel.clear(); renderList(); } }),
+        btn(`Delete ${fmt(sel.size)}`, { size: 'sm', kind: 'danger', icon: 'trash', onclick: () => deleteCampaigns([...sel], () => { sel.clear(); viewCampaigns(); }) })) : null,
+      h('div', { class: 'tbl-wrap' }, h('table', { class: 't' },
+      h('thead', {}, h('tr', {}, h('th', { class: 'w-cb' }, hcb), h('th', {}, 'Campaign'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Sent'), h('th', { class: 'num' }, 'Opens'), h('th', { class: 'num' }, 'Clicks'), h('th', { class: 'num' }, 'Replies'), h('th', { class: 'num' }, 'Bounced'), h('th', {}, ''))),
       h('tbody', {}, rows.map(c => {
-        const s = liveStatus(c);
-        return h('tr', { class: 'click', onclick: e => { if (!e.target.closest('button')) go('campaigns', 'report', c.id); } },
+        const s = liveStatus(c), run = isRunning(c);
+        const cb = h('input', { type: 'checkbox', checked: sel.has(c.id), disabled: run, title: run ? 'Stop it before deleting' : 'Select', onchange: e => { e.target.checked ? sel.add(c.id) : sel.delete(c.id); renderList(); } });
+        return h('tr', { class: 'click' + (sel.has(c.id) ? ' sel' : ''), onclick: e => { if (!e.target.closest('button,input')) go('campaigns', 'report', c.id); } },
+          h('td', { class: 'w-cb' }, cb),
           h('td', { style: 'max-width:340px' }, h('div', { class: 'b ellipsis' }, c.name), h('div', { class: 'sub-t ellipsis' }, c.subject || ''),
             c.brake_reason && s !== 'running' ? h('div', { class: 'xs', style: 'color:var(--red-d)' }, '⚠ ' + c.brake_reason.slice(0, 90)) : null),
           h('td', {}, statusPill(s), c.status === 'scheduled' && c.scheduled_at ? h('div', { class: 'xs muted', style: 'margin-top:3px' }, dt(c.scheduled_at)) : null),
           h('td', { class: 'num' }, fmt(liveSent(c))), h('td', { class: 'num' }, fmt(c.opens), h('div', { class: 'xs muted' }, pct(c.opens, liveSent(c)))),
           h('td', { class: 'num' }, fmt(c.clicks), h('div', { class: 'xs muted' }, pct(c.clicks, c.sent))), h('td', { class: 'num' }, h('b', { style: c.replies ? 'color:var(--green-d)' : '' }, fmt(c.replies)), h('div', { class: 'xs muted' }, pct(c.replies, c.sent))),
           h('td', { class: 'num' }, fmt(c.bounced), h('div', { class: 'xs muted' }, pct(c.bounced, (c.sent || 0) + (c.bounced || 0)))),
-          h('td', { style: 'width:44px' }, iconBtn('dots', 'Actions', e => campMenu(e.currentTarget, c), true)));
-      }))));
+          h('td', { class: 'nowrap', style: 'width:76px;text-align:right' }, run ? null : iconBtn('trash', 'Delete campaign', () => deleteCampaigns([c.id], () => viewCampaigns()), true),
+            iconBtn('dots', 'Actions', e => campMenu(e.currentTarget, c), true)));
+      })))));
+    }
     listCard.replaceChildren(tabs, body);
   };
   renderList();
@@ -468,11 +483,19 @@ function campMenu(anchor, c) {
     ['scheduled', 'queued'].includes(s) ? { label: 'Cancel schedule', icon: 'x', onclick: async () => { await POST(`/api/campaign/${c.id}/cancel`); toast('Schedule cancelled.'); render(); } } : null,
     { label: 'Export CSV report', icon: 'download', onclick: () => location.href = `/api/export/report/${c.id}.csv` },
     'sep',
-    running ? null : { label: 'Delete campaign', icon: 'trash', danger: true, onclick: async () => {
-      if (!await confirmBox({ title: 'Delete campaign?', text: `“${c.name}” and its follow-up steps will be deleted. Contacts are not affected.`, ok: 'Delete', danger: true })) return;
-      const r = await POST(`/api/campaign/${c.id}/delete`); r.ok ? toast('Campaign deleted.') : toast(r.error, 'err'); render();
-    } },
+    running ? { label: 'Stop it first to delete', icon: 'trash', onclick: () => toast('Stop the campaign (Stop button above) — then you can delete it.', 'info') } :
+      { label: 'Delete campaign', icon: 'trash', danger: true, onclick: () => deleteCampaigns([c.id], () => render()) },
   ]);
+}
+async function deleteCampaigns(ids, after) {
+  const one = ids.length === 1, c = one ? (APP.state.campaigns || []).find(x => x.id === ids[0]) : null;
+  if (!await confirmBox({ title: one ? 'Delete campaign?' : `Delete ${fmt(ids.length)} campaigns?`,
+    text: (one ? `“${c ? c.name : 'This campaign'}”` : 'These campaigns') + ' will be permanently deleted with their follow-up steps, reports and open/click stats. Your contacts are not affected, and bounced/unsubscribed addresses stay blocked.',
+    ok: one ? 'Delete' : `Delete ${fmt(ids.length)}`, danger: true })) return;
+  const r = one ? await POST(`/api/campaign/${ids[0]}/delete`) : await POST('/api/campaigns/delete', { ids });
+  if (!r.ok) return toast(r.error, 'err');
+  toast(one ? 'Campaign deleted.' : `Deleted ${fmt(r.count)} campaign(s).` + (r.skipped_running ? ` ${r.skipped_running} still sending — stop them first.` : ''));
+  await loadState(); after && after();
 }
 async function resumeRun(cid) {
   const r = await POST(`/api/campaign/${cid}/resume-run`);
@@ -595,7 +618,8 @@ function stepContent(box) {
         h('div', { class: 'xs muted', style: 'margin-bottom:6px' }, 'Insert merge tag'), h('div', {}, tags.map(t => h('span', { class: 'tagbtn', onclick: () => insert('{{' + t + '}}') }, '{{' + t.split('|')[0] + '}}'))),
         h('label', { class: 'f' }, 'HTML'), html,
         h('label', { class: 'f' }, 'Plain-text version', h('span', { class: 'opt' }, ' · optional')), text,
-        h('div', { class: 'hstack', style: 'margin-top:14px' }, btn('Check spam score', { icon: 'shield', onclick: () => checkSpam(spam) }), h('span', { class: 'spacer' })),
+        h('div', { class: 'hstack', style: 'margin-top:14px' }, btn('Check spam score', { icon: 'shield', onclick: () => checkSpam(spam) }), h('span', { class: 'spacer' }),
+          btn('Save as template', { icon: 'layout', onclick: () => { if (!CB.html.trim()) return toast('Write the email content first.', 'warn'); templateModal({ name: CB.name, subject: CB.subject, html: CB.html, text: CB.text }); } })),
         spam,
         hrule(),
         h('div', { class: 'b small' }, 'Send yourself a test'), h('div', { class: 'help' }, 'Uses your first selected sender. Subject is prefixed with [TEST].'),
@@ -719,7 +743,8 @@ async function showReport(id) {
   const status = liveStatus(c);
   setTop(btn('All campaigns', { icon: 'left', onclick: () => go('campaigns') }), btn('Duplicate', { icon: 'copy', onclick: () => duplicateCampaign(id) }),
     ['interrupted', 'stopped', 'error'].includes(status) ? btn('Resume sending', { kind: 'primary', icon: 'play', onclick: () => resumeRun(id) }) : null,
-    h('a', { class: 'btn', href: `/api/export/report/${id}.csv` }, icon('download', 16), 'Export'));
+    h('a', { class: 'btn', href: `/api/export/report/${id}.csv` }, icon('download', 16), 'Export'),
+    ['running', 'paused', 'waiting', 'braked'].includes(status) ? null : btn('Delete', { kind: 'danger', icon: 'trash', onclick: () => deleteCampaigns([id], () => c.parent_id ? go('campaigns', 'report', c.parent_id) : go('campaigns')) }));
   const liveBox = h('div');
   APP.live = () => { const j = (APP.state.jobs || {})[id]; if (j && j.status === 'running') liveBox.replaceChildren(card(h('span', { class: 'hstack' }, h('span', { class: 'live-dot' }), 'Live'), null, null, h('div', { class: 'card-b' }, runCard(j)))); else if (liveBox.firstChild) { liveBox.replaceChildren(); showReport(id); } };
   APP.live();
@@ -752,8 +777,12 @@ async function showReport(id) {
     h('thead', {}, h('tr', {}, h('th', {}, 'Step'), h('th', {}, 'Sends to'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Sent'), h('th', {}, 'When'), h('th', {}, ''))),
     h('tbody', {}, r.children.map(ch => h('tr', {}, h('td', {}, h('b', {}, 'Follow-up ' + ch.step_no)), h('td', { class: 'small' }, { non_openers: 'Non-openers', openers: 'Openers', all: 'Everyone' }[ch.send_to] || ch.send_to),
       h('td', {}, statusPill(liveStatus(ch))), h('td', { class: 'num' }, fmt(ch.sent)), h('td', { class: 'small muted' }, dt(ch.scheduled_at)),
-      h('td', {}, ['scheduled', 'queued'].includes(ch.status) ? btn('Cancel', { size: 'sm', kind: 'quiet', onclick: async () => { await POST(`/api/campaign/${ch.id}/cancel`); toast('Follow-up cancelled.'); showReport(id); } }) :
-        h('a', { class: 'small', href: '#campaigns/report/' + ch.id }, 'Report')))))))));
+      h('td', { class: 'nowrap', style: 'text-align:right' }, ['scheduled', 'queued'].includes(ch.status) ? btn('Cancel', { size: 'sm', kind: 'quiet', onclick: async () => { await POST(`/api/campaign/${ch.id}/cancel`); toast('Follow-up cancelled.'); showReport(id); } }) :
+        h('a', { class: 'small', href: '#campaigns/report/' + ch.id, style: 'margin-right:8px' }, 'Report'),
+        ['running', 'paused', 'waiting', 'braked'].includes(liveStatus(ch)) ? null : iconBtn('trash', 'Delete this follow-up step', async () => {
+          if (!await confirmBox({ title: `Delete follow-up ${ch.step_no}?`, text: 'This step and its stats are deleted. It will not be sent. The main campaign and other steps are kept.', ok: 'Delete step', danger: true })) return;
+          const x = await POST(`/api/campaign/${ch.id}/delete`); x.ok ? toast('Follow-up deleted.') : toast(x.error, 'err'); showReport(id);
+        }, true)))))))));
   if ((r.failures || []).length) left.push(card('Bounces & failures', 'Hard bounces are removed from your list automatically', null, h('div', { class: 'tbl-wrap', style: 'max-height:360px;overflow:auto' }, h('table', { class: 't' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Email'), h('th', {}, 'Type'), h('th', {}, 'Reason'))),
     h('tbody', {}, r.failures.map(f => h('tr', {}, h('td', { class: 'small' }, f.email), h('td', {}, f.status === 'bounced' ? pill('Bounced', 'r') : pill('Failed', 'a')), h('td', { class: 'xs muted', style: 'max-width:420px' }, f.error))))))));
@@ -783,7 +812,8 @@ async function viewInbox() {
   const top = anyImap ? null : h('div', { style: 'margin-bottom:14px' }, banner('warn', h('span', {}, h('b', {}, 'Inbox sync is off. '), 'Connect IMAP for your senders so MailBlaster can collect replies and process bounces automatically.'), [btn('Set up', { size: 'sm', onclick: () => go('senders') })]));
   const f = h('div', { class: 'ib-f', id: 'ibf' }), l = h('div', { class: 'ib-l' }), r = h('div', { class: 'ib-r', id: 'ibr' });
   const search = h('input', { placeholder: 'Search replies…', value: IBQ.q, oninput: debounce(e => { IBQ.q = e.target.value; IBQ.page = 0; loadInbox(); }, 250) });
-  l.append(h('div', { class: 'lh' }, h('div', { class: 'inp-ic' }, icon('search', 15), search)), h('div', { class: 'items', id: 'ibitems' }));
+  IBQ.chk = new Set();
+  l.append(h('div', { class: 'lh' }, h('div', { class: 'inp-ic' }, icon('search', 15), search), h('div', { id: 'ibbulk' })), h('div', { class: 'items', id: 'ibitems' }));
   v.replaceChildren(...[top, h('div', { class: 'ib' }, f, l, r)].filter(Boolean));
   renderInboxFilters(); loadInbox();
   if (IBQ.sel) openInboxItem(IBQ.sel); else r.replaceChildren(emptyState('inbox', 'Select a message', 'Replies are matched to the campaign and contact they belong to. Label them to track your pipeline.'));
@@ -802,14 +832,38 @@ async function loadInbox() {
   const per = 40 * (IBQ.page + 1);
   const d = await GET(`/api/inbox?box=${IBQ.box}&q=${encodeURIComponent(IBQ.q)}&page=0&per=${per}`);
   if (d.counts) { APP.state.inbox = d.counts; renderNav(); renderInboxFilters(); }
+  IBQ.chk = IBQ.chk || new Set();
+  const ids = (d.rows || []).map(x => x.id); [...IBQ.chk].forEach(i => { if (!ids.includes(i)) IBQ.chk.delete(i); });
+  renderInboxBulk(d.total || 0);
   if (!(d.rows || []).length) { box.replaceChildren(h('div', { class: 'empty', style: 'padding:40px 16px' }, h('div', { class: 'small' }, IBQ.q ? 'No matches.' : 'Nothing here yet.'))); return; }
   const kindIc = { bounce: 'bounce', complaint: 'alert', auto: 'bot' };
-  box.replaceChildren(...d.rows.map(x => h('div', { class: 'ib-item' + (IBQ.sel === x.id ? ' on' : '') + (!x.is_read && x.kind === 'reply' ? ' unread' : ''), onclick: e => { IBQ.sel = x.id; box.querySelectorAll('.ib-item').forEach(n => n.classList.remove('on')); e.currentTarget.classList.add('on'); e.currentTarget.classList.remove('unread'); openInboxItem(x.id); } },
+  box.replaceChildren(...d.rows.map(x => h('div', { class: 'ib-item' + (IBQ.sel === x.id ? ' on' : '') + (!x.is_read && x.kind === 'reply' ? ' unread' : ''), onclick: e => { if (e.target.closest('input')) return; IBQ.sel = x.id; box.querySelectorAll('.ib-item').forEach(n => n.classList.remove('on')); e.currentTarget.classList.add('on'); e.currentTarget.classList.remove('unread'); openInboxItem(x.id); } },
+    h('input', { type: 'checkbox', class: 'ib-cb', title: 'Select', checked: IBQ.chk.has(x.id), onchange: e => { e.target.checked ? IBQ.chk.add(x.id) : IBQ.chk.delete(x.id); renderInboxBulk(d.total || 0); } }),
     kindIc[x.kind] ? h('div', { class: 'avatar', style: 'background:#eef1f6;color:#64748b' }, icon(kindIc[x.kind], 16)) : avatar(x.from_name, x.from_email),
     h('div', { class: 'body' }, h('div', { class: 'hstack', style: 'gap:6px;flex-wrap:nowrap' }, h('span', { class: 'who ellipsis', style: 'flex:1' }, x.from_name || x.from_email), h('span', { class: 'when' }, timeAgo(x.received_at))),
       h('div', { class: 'subj ellipsis' }, x.subject || '(no subject)'), h('div', { class: 'snip' }, x.snippet),
       h('div', { class: 'hstack', style: 'margin-top:5px;gap:5px' }, labelPill(x.label), x.campaign ? h('span', { class: 'chip', style: 'font-size:11px' }, icon('send', 11), h('span', { class: 't' }, x.campaign)) : null)))),
     d.total > d.rows.length ? h('div', { style: 'padding:10px;text-align:center' }, btn(`Load more (${fmt(d.total - d.rows.length)} older)`, { size: 'sm', onclick: () => { IBQ.page++; loadInbox(); } })) : null);
+}
+function renderInboxBulk(total) {
+  const b = $('#ibbulk'); if (!b) return;
+  const n = IBQ.chk.size, folder = (IB_BOXES.find(x => x[0] === IBQ.box) || [])[1] || 'this folder';
+  const afterDelete = async (r, msg) => {
+    if (!r.ok) return toast(r.error, 'err'); toast(msg.replace('#', fmt(r.count)));
+    if (IBQ.sel && (r.all || IBQ.chk.has(IBQ.sel))) { IBQ.sel = null; const p = $('#ibr'); p && p.replaceChildren(emptyState('inbox', 'Select a message', '')); }
+    IBQ.chk.clear(); await refreshInboxCounts(); loadInbox();
+  };
+  b.replaceChildren(n ? h('div', { class: 'hstack ib-bulk' }, h('b', { class: 'small' }, `${fmt(n)} selected`), h('span', { class: 'spacer' }),
+    h('a', { class: 'xs', style: 'cursor:pointer', onclick: () => { IBQ.chk.clear(); loadInbox(); } }, 'Clear'),
+    btn('Delete', { size: 'sm', kind: 'danger', icon: 'trash', onclick: async () => {
+      if (!await confirmBox({ title: `Delete ${fmt(n)} message(s)?`, text: 'They are removed from MailBlaster only — the emails in your real mailbox are not touched.', ok: 'Delete', danger: true })) return;
+      const sel = IBQ.sel && IBQ.chk.has(IBQ.sel); const r = await POST('/api/inbox/delete', { ids: [...IBQ.chk] }); r.all = sel; afterDelete(r, 'Deleted # message(s).');
+    } })) :
+    total ? h('div', { class: 'hstack ib-bulk' }, h('span', { class: 'xs muted' }, `${fmt(total)} in ${folder}`), h('span', { class: 'spacer' }),
+      h('a', { class: 'xs', style: 'cursor:pointer;color:var(--red-d)', onclick: async () => {
+        if (!await confirmBox({ title: `Delete all ${fmt(total)} in “${folder}”${IBQ.q ? ' matching your search' : ''}?`, text: 'They are removed from MailBlaster only — the emails in your real mailbox are not touched.', ok: 'Delete all', danger: true, typeText: total >= 50 ? 'DELETE' : null })) return;
+        const r = await POST('/api/inbox/delete', { all: 1, box: IBQ.box, q: IBQ.q }); r.all = true; afterDelete(r, 'Deleted # message(s).');
+      } }, 'Delete all')) : null);
 }
 async function openInboxItem(id) {
   const r = $('#ibr'); if (!r) return; r.replaceChildren(h('div', { class: 'empty' }, 'Loading…'));
@@ -827,7 +881,12 @@ async function openInboxItem(id) {
   const actions = h('div', { class: 'hstack' },
     iconBtn('archive', it.archived ? 'Move to inbox' : 'Archive', async () => { await POST('/api/inbox/' + id, { archived: it.archived ? 0 : 1 }); toast(it.archived ? 'Moved back to inbox.' : 'Archived.'); IBQ.sel = null; loadInbox(); r.replaceChildren(emptyState('inbox', 'Select a message', '')); refreshInboxCounts(); }),
     iconBtn('mail', 'Mark as unread', async () => { await POST('/api/inbox/' + id, { is_read: 0 }); toast('Marked unread.'); loadInbox(); refreshInboxCounts(); }),
-    it.contact_id ? iconBtn('user', 'Open contact', () => contactModal(it.contact_id)) : null);
+    it.contact_id ? iconBtn('user', 'Open contact', () => contactModal(it.contact_id)) : null,
+    iconBtn('trash', 'Delete message', async () => {
+      if (!await confirmBox({ title: 'Delete this message?', text: 'It is removed from MailBlaster only — the email in your real mailbox is not touched.', ok: 'Delete', danger: true })) return;
+      const x = await POST('/api/inbox/delete', { ids: id }); if (!x.ok) return toast(x.error, 'err');
+      toast('Message deleted.'); IBQ.sel = null; r.replaceChildren(emptyState('inbox', 'Select a message', '')); refreshInboxCounts(); loadInbox();
+    }));
   const thread = (it.thread && it.thread.length ? it.thread : [it]);
   const msgs = thread.map(m => h('div', { class: 'msg' + (m.kind === 'outgoing' ? ' out' : m.kind === 'auto' ? ' auto' : '') },
     h('div', { class: 'mh' }, m.kind === 'outgoing' ? h('b', {}, 'You') : h('b', {}, m.from_name || m.from_email), m.kind === 'auto' ? pill('Auto-reply', 'm') : null, h('span', { class: 'spacer' }), dt(m.received_at)),
@@ -889,7 +948,8 @@ function renderGroupPanel(gp) {
   const groups = APP.state.groups || [], c = APP.state.contacts || {};
   const item = (key, label, n, color, g) => h('div', { class: 'gitem' + (String(CQ.group) === String(key) ? ' on' : ''), onclick: e => { if (e.target.closest('.gm')) return; CQ.group = key; CQ.page = 0; clearSel(); renderGroupPanel(); renderContactMain(); } },
     color ? h('span', { class: 'sw', style: 'background:' + color }) : icon(key === 'none' ? 'minus' : 'users', 15), h('span', { class: 'gn' }, label), h('span', { class: 'gc' }, fmt(n)),
-    g ? h('span', { class: 'gm' }, iconBtn('dots', 'Group options', e => { e.stopPropagation(); groupMenu(e.currentTarget, g); }, true)) : null);
+    g ? h('span', { class: 'gm', style: 'display:inline-flex' }, iconBtn('trash', 'Delete group', e => { e.stopPropagation(); deleteGroupModal(g); }, true),
+      iconBtn('dots', 'Group options', e => { e.stopPropagation(); groupMenu(e.currentTarget, g); }, true)) : null);
   gp.replaceChildren(h('div', { class: 'card', style: 'margin:0' }, h('div', { class: 'card-b' },
     item('', 'All contacts', c.total), item('none', 'Not in a group', c.ungrouped),
     h('div', { class: 'glab' }, 'Groups', h('span', { class: 'spacer' }), iconBtn('plus', 'New group', () => groupModal(), true)),
@@ -984,7 +1044,7 @@ function renderContactTable() {
   hcb.indeterminate = !allPage && somePage;
   hcb.addEventListener('change', () => { if (hcb.checked) pageIds.forEach(id => CQ.sel.add(id)); else { pageIds.forEach(id => CQ.sel.delete(id)); CQ.all = false; } renderContactTable(); renderBulk(); });
   tb.replaceChildren(h('table', { class: 't' },
-    h('thead', {}, h('tr', {}, h('th', { class: 'w-cb' }, hcb), h('th', {}, 'Contact'), h('th', {}, 'Groups'), h('th', {}, 'Status'), h('th', {}, 'Added'))),
+    h('thead', {}, h('tr', {}, h('th', { class: 'w-cb' }, hcb), h('th', {}, 'Contact'), h('th', {}, 'Groups'), h('th', {}, 'Status'), h('th', {}, 'Added'), h('th', {}, ''))),
     h('tbody', {}, CQ.rows.map(r => {
       const on = CQ.all || CQ.sel.has(r.id);
       const cb = h('input', { type: 'checkbox', checked: on, onclick: e => e.stopPropagation(), onchange: e => { if (e.target.checked) CQ.sel.add(r.id); else { CQ.sel.delete(r.id); if (CQ.all) { CQ.all = false; pageIds.forEach(id => id !== r.id && CQ.sel.add(id)); } } renderContactTable(); renderBulk(); } });
@@ -994,7 +1054,12 @@ function renderContactTable() {
         h('td', {}, h('div', { class: 'hstack', style: 'flex-wrap:nowrap' }, avatar(nm, r.email, 30), h('div', { style: 'min-width:0' }, h('div', { class: 'b small ellipsis' }, nm || r.email), nm ? h('div', { class: 'xs muted ellipsis' }, r.email) : null))),
         h('td', {}, h('div', { class: 'hstack', style: 'gap:4px' }, (r.groups || []).slice(0, 3).map(chip), (r.groups || []).length > 3 ? h('span', { class: 'xs muted' }, '+' + (r.groups.length - 3)) : null, !(r.groups || []).length ? h('span', { class: 'xs dim' }, '—') : null)),
         h('td', {}, statusPillC(r.status), r.replied_at ? h('span', { style: 'margin-left:4px' }, pill('Replied', 's')) : null),
-        h('td', { class: 'xs muted nowrap' }, new Date(r.created_at * 1000).toLocaleDateString()));
+        h('td', { class: 'xs muted nowrap' }, new Date(r.created_at * 1000).toLocaleDateString()),
+        h('td', { style: 'width:40px;text-align:right' }, iconBtn('trash', 'Delete contact', async () => {
+          if (!await confirmBox({ title: 'Delete contact?', text: r.email + ' will be removed permanently from MailBlaster and all groups. If they unsubscribed or bounced they stay blocked.', ok: 'Delete', danger: true })) return;
+          const x = await POST(`/api/contacts/${r.id}/delete`); if (x.ok === false) return toast(x.error, 'err');
+          CQ.sel.delete(r.id); toast('Contact deleted.'); await loadState(); renderGroupPanel(); loadContacts();
+        }, true)));
     }))));
 }
 function selCount() { return CQ.all ? CQ.total : CQ.sel.size; }
@@ -1134,14 +1199,38 @@ function verifyModal() {
 
 /* ================================================================== TEMPLATES */
 async function viewTemplates() {
-  const grid = h('div', { class: 'tpl-grid' });
-  $('#view').replaceChildren(card('Template gallery', 'Click a template to start a campaign with it. Every template is personalized with merge tags and includes an unsubscribe link.', null, h('div', { class: 'card-b' }, grid)));
-  for (const t of APP.state.templates || []) {
-    const full = await GET('/api/templates/' + t.id);
-    grid.append(h('div', { class: 'tpl', onclick: () => newCampaign({ subject: full.subject || '', html: full.html || '', text: full.text || '', name: t.name + ' campaign' }) },
-      h('div', { class: 'pv' }, h('iframe', { srcdoc: '<meta charset="utf-8"><style>body{font-family:Arial,sans-serif;margin:24px;color:#222}</style>' + previewFill(full.html || ''), tabindex: '-1' })),
-      h('div', { class: 'meta' }, h('div', { style: 'flex:1;min-width:0' }, h('b', { class: 'small' }, t.name), h('div', { class: 'xs muted ellipsis' }, full.subject || '')), pill(t.category, 'b'))));
-  }
+  await loadState();
+  const all = APP.state.templates || [], mine = all.filter(t => !t.builtin), built = all.filter(t => t.builtin), hidden = APP.state.hidden_templates || 0;
+  setTop(btn('New template', { kind: 'primary', icon: 'plus', onclick: () => templateModal() }));
+  const myGrid = h('div', { class: 'tpl-grid' }), grid = h('div', { class: 'tpl-grid' });
+  const restore = hidden ? btn(`Restore ${hidden} removed`, { size: 'sm', icon: 'refresh', onclick: async () => { await POST('/api/templates/restore'); toast('Built-in templates restored.'); viewTemplates(); } }) : null;
+  $('#view').replaceChildren(
+    card('My templates', 'Your own saved emails. Save one from the campaign builder (step 2) or click “New template”.', null,
+      h('div', { class: 'card-b' }, mine.length ? myGrid : h('div', { class: 'small muted' }, 'No saved templates yet.'))),
+    card('Template gallery', 'Click a template to start a campaign with it. Every template is personalized with merge tags and includes an unsubscribe link.', restore,
+      h('div', { class: 'card-b' }, built.length ? grid : h('div', { class: 'small muted' }, 'All built-in templates were removed.'))));
+  const tile = async (t, into) => {
+    const full = await GET('/api/templates/' + t.id); if (!full || !full.id) return;
+    const del = h('button', { class: 'icon-btn sm del', type: 'button', title: t.builtin ? 'Remove from gallery' : 'Delete template', onclick: async e => {
+      e.stopPropagation();
+      if (!await confirmBox({ title: t.builtin ? `Remove “${t.name}”?` : `Delete “${t.name}”?`, text: t.builtin ? 'It is hidden from the gallery. You can bring it back with “Restore removed”.' : 'This saved template is deleted permanently. Campaigns already sent with it are not affected.', ok: t.builtin ? 'Remove' : 'Delete', danger: true })) return;
+      const r = await POST(`/api/templates/${t.id}/delete`); r.ok ? toast(t.builtin ? 'Template removed.' : 'Template deleted.') : toast(r.error, 'err'); viewTemplates();
+    } }, icon('trash', 15));
+    into.append(h('div', { class: 'tpl', onclick: () => newCampaign({ subject: full.subject || '', html: full.html || '', text: full.text || '', name: t.name + ' campaign' }) },
+      h('div', { class: 'pv' }, del, h('iframe', { srcdoc: '<meta charset="utf-8"><style>body{font-family:Arial,sans-serif;margin:24px;color:#222}</style>' + previewFill(full.html || ''), tabindex: '-1' })),
+      h('div', { class: 'meta' }, h('div', { style: 'flex:1;min-width:0' }, h('b', { class: 'small' }, t.name), h('div', { class: 'xs muted ellipsis' }, full.subject || '')), pill(t.category, t.builtin ? 'b' : 'g'))));
+  };
+  for (const t of mine) await tile(t, myGrid);
+  for (const t of built) await tile(t, grid);
+}
+function templateModal(preset = {}) {
+  const name = h('input', { value: preset.name || '', placeholder: 'e.g. Agency intro v2' }), subj = h('input', { value: preset.subject || '', placeholder: 'Subject line' });
+  const html = h('textarea', { style: 'min-height:200px;font-family:monospace;font-size:12.5px', placeholder: '<p>Hi {{first_name|there}},</p>…' }); html.value = preset.html || '';
+  const m = modal({ title: 'Save as template', icon: 'layout', wide: true, body: h('div', {}, field('Template name', name), field('Subject', subj, 'optional'), field('Email content (HTML)', html)),
+    footer: [btn('Cancel', { onclick: () => m.close() }), btn('Save template', { kind: 'primary', icon: 'check', onclick: async () => {
+      const r = await POST('/api/templates', { name: name.value.trim(), subject: subj.value, html: html.value, text: preset.text || '' });
+      if (!r.ok) return toast(r.error, 'warn'); toast('Template saved — find it under Templates › My templates.'); m.close(); await loadState(); if (APP.view === 'templates') viewTemplates();
+    } })] });
 }
 
 /* ================================================================== SENDERS */
@@ -1175,10 +1264,16 @@ function accCard(a) {
     h('div', { class: 'af' }, btn('Test SMTP', { size: 'sm', icon: 'zap', onclick: async e => { const b = e.currentTarget; b.disabled = true; const r = await POST(`/api/accounts/${a.id}/test`); b.disabled = false; r.ok ? toast(r.message) : toast(r.error, 'err', 9000); } }),
       a.imap_enabled ? btn('Sync inbox', { size: 'sm', icon: 'refresh', onclick: async () => { await POST(`/api/accounts/${a.id}/sync`); toast('Syncing this inbox…', 'info'); setTimeout(viewSenders, 6000); } }) : btn('Enable inbox sync', { size: 'sm', icon: 'inbox', onclick: () => go('senders', 'edit', a.id) }),
       h('span', { class: 'spacer' }), btn('Edit', { size: 'sm', icon: 'edit', onclick: () => go('senders', 'edit', a.id) }),
+      iconBtn('trash', 'Remove sender', () => removeSender(a), true),
       iconBtn('dots', 'More', e => openMenu(e.currentTarget, [
         { label: a.active ? 'Turn off' : 'Turn on', icon: a.active ? 'pause' : 'play', onclick: async () => { await POST('/api/accounts/' + a.id, { active: a.active ? 0 : 1 }); viewSenders(); } },
         w.active ? { label: 'Restart warm-up from day 1', icon: 'flame', onclick: async () => { await POST(`/api/accounts/${a.id}/warmup-restart`); toast('Warm-up restarted.'); viewSenders(); } } : null,
-        'sep', { label: 'Remove sender', icon: 'trash', danger: true, onclick: async () => { if (!await confirmBox({ title: 'Remove this sender?', text: `${a.from_email} will be removed. Campaign history is kept.`, ok: 'Remove', danger: true })) return; await POST('/api/accounts/' + a.id, { _delete: 1 }); toast('Sender removed.'); viewSenders(); } }]), true)));
+        'sep', { label: 'Remove sender', icon: 'trash', danger: true, onclick: () => removeSender(a) }]), true)));
+}
+async function removeSender(a) {
+  if (!await confirmBox({ title: 'Remove this sender?', text: `${a.from_email} and its saved password will be removed from MailBlaster. Campaign history is kept. Campaigns still using it continue on their other senders.`, ok: 'Remove', danger: true })) return;
+  const r = await POST('/api/accounts/' + a.id, { _delete: 1 }); if (r.ok === false) return toast(r.error, 'err');
+  toast('Sender removed.'); await loadState(); go('senders');
 }
 const PRESET_NAMES = { gmail: 'Gmail', outlook: 'Outlook / 365', yahoo: 'Yahoo', zoho: 'Zoho', sendgrid: 'SendGrid', mailgun: 'Mailgun', ses: 'Amazon SES', brevo: 'Brevo' };
 function senderForm(id) {
@@ -1239,7 +1334,8 @@ function senderForm(id) {
     sec_('flame', 'Daily limit & warm-up', 'Protect a new sender’s reputation', field('Daily sending limit', limit, null, 'The most this account will ever send in one day.'),
       h('div', { style: 'margin-top:16px' }, toggle('Warm up this sender', wOn, x => { wOn = x; wBox.style.display = x ? '' : 'none'; }, 'Start low and increase the daily limit a little every day')), h('div', { style: 'margin-top:12px' }, wBox)),
     sec_('inbox', 'Inbox sync (IMAP)', 'Automatic bounce processing & reply detection', toggle('Sync this inbox', iOn, x => { iOn = x; iBox.style.display = x ? '' : 'none'; autoImap(); }, 'Read bounces, complaints and replies from this mailbox every few minutes'), h('div', { style: 'margin-top:14px' }, iBox)),
-    h('div', { class: 'hstack' }, btn(id ? 'Save changes' : 'Add sender', { kind: 'primary', size: 'lg', icon: 'check', onclick: save }), btn('Cancel', { size: 'lg', onclick: () => go('senders') }))));
+    h('div', { class: 'hstack' }, btn(id ? 'Save changes' : 'Add sender', { kind: 'primary', size: 'lg', icon: 'check', onclick: save }), btn('Cancel', { size: 'lg', onclick: () => go('senders') }),
+      id && a.id ? h('span', { class: 'spacer' }) : null, id && a.id ? btn('Remove sender', { size: 'lg', kind: 'danger', icon: 'trash', onclick: () => removeSender(a) }) : null)));
 }
 
 /* ================================================================== DELIVERABILITY */
@@ -1285,20 +1381,38 @@ async function viewDeliverability() {
   // tabs: bounces / suppression
   const tabCard = h('div', { class: 'card' }); const tabBody = h('div');
   const drawTabs = () => { tabCard.replaceChildren(h('div', { class: 'tabs' }, [['bounces', 'Recent bounces'], ['suppression', 'Suppression list']].map(([k, l]) => h('button', { class: DTAB === k ? 'on' : '', onclick: () => { DTAB = k; drawTabs(); } }, l))), tabBody); DTAB === 'bounces' ? drawBounces(d.bounces || []) : drawSupp(); };
-  const drawBounces = rows => tabBody.replaceChildren(rows.length ? h('div', { class: 'tbl-wrap', style: 'max-height:460px;overflow:auto' }, h('table', { class: 't' },
-    h('thead', {}, h('tr', {}, h('th', {}, 'Email'), h('th', {}, 'Type'), h('th', {}, 'Reason'), h('th', {}, 'Campaign'), h('th', {}, 'Source'), h('th', {}, 'When'))),
+  const reloadBounces = async () => { const x = await GET('/api/deliverability'); d.bounces = x.bounces || []; drawBounces(d.bounces); };
+  const delBounces = async (body, msg) => { const r = await POST('/api/bounces/delete', body); if (!r.ok) return toast(r.error, 'err'); toast(msg.replace('#', fmt(r.count))); reloadBounces(); };
+  const drawBounces = rows => tabBody.replaceChildren(rows.length ? h('div', {},
+    h('div', { class: 'toolbar' }, h('span', { class: 'xs muted' }, 'Deleting log entries does not un-block the address — use the Suppression list for that.'), h('span', { class: 'spacer' }),
+      btn('Clear bounce log', { size: 'sm', kind: 'danger', icon: 'trash', onclick: async () => { if (await confirmBox({ title: 'Clear the whole bounce log?', text: 'All bounce records are deleted (bounce-rate stats reset). Bounced addresses stay on the suppression list, so they still won’t be emailed.', ok: 'Clear log', danger: true })) delBounces({ all: 1 }, 'Deleted # bounce record(s).'); } })),
+    h('div', { class: 'tbl-wrap', style: 'max-height:460px;overflow:auto' }, h('table', { class: 't' },
+    h('thead', {}, h('tr', {}, h('th', {}, 'Email'), h('th', {}, 'Type'), h('th', {}, 'Reason'), h('th', {}, 'Campaign'), h('th', {}, 'Source'), h('th', {}, 'When'), h('th', {}, ''))),
     h('tbody', {}, rows.map(b => h('tr', {}, h('td', { class: 'small' }, b.email), h('td', {}, b.kind === 'hard' ? pill('Hard', 'r') : b.kind === 'soft' ? pill('Soft', 'a') : pill('Complaint', 'v')),
-      h('td', { class: 'xs muted', style: 'max-width:380px' }, (b.code && !(b.reason || '').includes(b.code) ? b.code + ' ' : '') + (b.reason || '')), h('td', { class: 'small' }, b.campaign || '—'), h('td', { class: 'xs' }, b.source === 'imap' ? 'Inbox' : 'SMTP'), h('td', { class: 'xs muted nowrap' }, timeAgo(b.ts))))))) :
+      h('td', { class: 'xs muted', style: 'max-width:380px' }, (b.code && !(b.reason || '').includes(b.code) ? b.code + ' ' : '') + (b.reason || '')), h('td', { class: 'small' }, b.campaign || '—'), h('td', { class: 'xs' }, b.source === 'imap' ? 'Inbox' : 'SMTP'), h('td', { class: 'xs muted nowrap' }, timeAgo(b.ts)),
+      h('td', { style: 'width:40px' }, iconBtn('trash', 'Delete this record', () => delBounces({ ids: b.id }, 'Bounce record deleted.'), true)))))))) :
     emptyState('shield', 'No bounces', 'When an address bounces — at send time or via a bounce email in your inbox — it shows up here and is removed from sending automatically.'));
   const SQ = { q: '', page: 0 };
   const drawSupp = async () => {
     const list = h('div'); const q = h('input', { placeholder: 'Search suppressed emails…', value: SQ.q, oninput: debounce(e => { SQ.q = e.target.value; SQ.page = 0; load(); }, 250) });
+    const chk = new Set();
+    const removeSupp = async emails => {
+      if (!await confirmBox({ title: emails.length === 1 ? 'Remove from suppression?' : `Remove ${fmt(emails.length)} addresses from suppression?`, text: `${emails.length === 1 ? emails[0] : 'These addresses'} could be emailed again if they are (re)imported and active. Only do this if you are sure they want your emails.`, ok: 'Remove', danger: true })) return;
+      const r = await POST('/api/suppression/remove', { email: emails }); if (!r.ok) return toast(r.error, 'err');
+      toast(`Removed ${fmt(r.count)} address(es).`); chk.clear(); load();
+    };
     const load = async () => {
       const r = await GET(`/api/suppression?q=${encodeURIComponent(SQ.q)}&page=${SQ.page}`);
-      list.replaceChildren(!(r.rows || []).length ? h('div', { class: 'empty', style: 'padding:30px' }, 'No suppressed addresses.') : h('div', { class: 'tbl-wrap' }, h('table', { class: 't' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Email'), h('th', {}, 'Reason'), h('th', {}, 'Since'), h('th', {}, ''))),
-        h('tbody', {}, r.rows.map(x => h('tr', {}, h('td', { class: 'small' }, x.email), h('td', {}, pill(x.reason, x.reason === 'bounce' ? 'r' : x.reason === 'complaint' ? 'v' : 'm')), h('td', { class: 'xs muted' }, timeAgo(x.ts)),
-          h('td', { style: 'text-align:right' }, btn('Remove', { size: 'sm', kind: 'quiet', onclick: async () => { if (!await confirmBox({ title: 'Remove from suppression?', text: `${x.email} could be emailed again if they are (re)imported and active. Only do this if you are sure they want your emails.`, ok: 'Remove', danger: true })) return; await POST('/api/suppression/remove', { email: x.email }); toast('Removed.'); load(); } }))))))),
+      const rows = r.rows || [], allOn = rows.length > 0 && rows.every(x => chk.has(x.email));
+      const hcb = h('input', { type: 'checkbox', checked: allOn, title: 'Select all on this page', onchange: e => { rows.forEach(x => e.target.checked ? chk.add(x.email) : chk.delete(x.email)); load(); } });
+      list.replaceChildren(!rows.length ? h('div', { class: 'empty', style: 'padding:30px' }, 'No suppressed addresses.') : h('div', {},
+        chk.size ? h('div', { class: 'bulkbar' }, h('b', {}, `${fmt(chk.size)} selected`), h('span', { class: 'spacer' }), btn('Clear selection', { size: 'sm', onclick: () => { chk.clear(); load(); } }),
+          btn(`Remove ${fmt(chk.size)}`, { size: 'sm', kind: 'danger', icon: 'trash', onclick: () => removeSupp([...chk]) })) : null,
+        h('div', { class: 'tbl-wrap' }, h('table', { class: 't' },
+        h('thead', {}, h('tr', {}, h('th', { class: 'w-cb' }, hcb), h('th', {}, 'Email'), h('th', {}, 'Reason'), h('th', {}, 'Since'), h('th', {}, ''))),
+        h('tbody', {}, rows.map(x => h('tr', { class: chk.has(x.email) ? 'sel' : '' }, h('td', { class: 'w-cb' }, h('input', { type: 'checkbox', checked: chk.has(x.email), onchange: e => { e.target.checked ? chk.add(x.email) : chk.delete(x.email); load(); } })),
+          h('td', { class: 'small' }, x.email), h('td', {}, pill(x.reason, x.reason === 'bounce' ? 'r' : x.reason === 'complaint' ? 'v' : 'm')), h('td', { class: 'xs muted' }, timeAgo(x.ts)),
+          h('td', { style: 'text-align:right' }, btn('Remove', { size: 'sm', kind: 'quiet', icon: 'trash', onclick: () => removeSupp([x.email]) })))))))),
         h('div', { class: 'pager' }, h('span', {}, `${fmt(r.total)} suppressed`), h('span', { class: 'spacer' }), btn('', { size: 'sm', icon: 'left', disabled: SQ.page <= 0, onclick: () => { SQ.page--; load(); } }), btn('', { size: 'sm', icon: 'right', disabled: (SQ.page + 1) * r.per >= r.total, onclick: () => { SQ.page++; load(); } })));
     };
     tabBody.replaceChildren(h('div', { class: 'toolbar' }, h('div', { class: 'inp-ic', style: 'flex:1;max-width:340px' }, icon('search', 15), q), h('span', { class: 'spacer' }),
@@ -1360,6 +1474,19 @@ function viewSettings() {
     h('div', { class: 'hstack', style: 'margin-bottom:18px' }, btn('Save settings', { kind: 'primary', icon: 'check', onclick: async () => { const r = await POST('/api/settings', { sending_window_start: ws.value, sending_window_end: we.value }); r.ok ? toast('Settings saved.') : toast(r.error, 'err'); await loadState(); } })),
     card('Your data', 'Everything is stored locally on this computer', null, h('div', { class: 'card-b hstack' },
       h('a', { class: 'btn', href: '/api/export/contacts.csv' }, icon('download', 16), 'Export all contacts'), h('a', { class: 'btn', href: '/api/export/suppression.csv' }, icon('download', 16), 'Export suppression list'))),
+    card('Delete data', 'Permanently remove data from this computer. Tip: export a CSV first.', null, h('div', { class: 'card-b' },
+      [['campaigns', 'All campaigns & reports', 'Every campaign, follow-up, send log and open/click stat. Contacts are kept.'],
+        ['inbox', 'Inbox', 'All replies, auto-replies and bounce emails stored in MailBlaster (your real mailbox is not touched).'],
+        ['bounces', 'Bounce log', 'The bounce history. Bounced addresses stay blocked on the suppression list.'],
+        ['templates', 'My templates', 'Templates you saved yourself. Built-in templates are not affected.'],
+        ['contacts', 'All contacts', 'Every contact and group membership. Groups and campaigns are kept.'],
+        ['everything', 'Everything', 'Campaigns, contacts, groups, inbox, bounce log and your templates — a fresh start. Senders, settings and the suppression list are kept.']].map(([k, t, d]) =>
+        h('div', { class: 'danger-row' }, h('div', { style: 'flex:1;min-width:0' }, h('b', { class: 'small' }, t), h('div', { class: 'xs muted' }, d)),
+          btn('Delete', { size: 'sm', kind: 'danger', icon: 'trash', onclick: async () => {
+            if (!await confirmBox({ title: `Delete ${t.toLowerCase()}?`, text: d + ' This cannot be undone.', ok: 'Delete permanently', danger: true, typeText: 'DELETE' })) return;
+            const r = k === 'contacts' ? await POST('/api/contacts/delete-all', { confirm: 'DELETE' }) : await POST('/api/data/clear', { what: k, confirm: 'DELETE' });
+            if (!r.ok) return toast(r.error, 'err'); toast(`Done — ${fmt(r.count)} item(s) deleted.`); await loadState(); renderNav();
+          } }))))),
     card('Compliance', null, null, h('div', { class: 'card-b small muted', style: 'line-height:1.7' },
       'Every email carries a working unsubscribe link and List-Unsubscribe header. Unsubscribes, complaints and hard bounces go on a permanent suppression list that survives deleting and re-importing contacts. Only send to people who agreed to hear from you or have a legitimate business reason, identify yourself honestly, and include your postal address in the footer.'))));
 }

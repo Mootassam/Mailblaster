@@ -44,9 +44,11 @@ except Exception:  # running from source without the helper
 if os.environ.get("MB_DB"):          # alternate database (testing / multiple workspaces)
     store.set_db_path(os.environ["MB_DB"])
 
+VERSION = "3.1.0"
 app = Flask(__name__, static_folder=_STATIC)
 app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024
-store.init()
+# store.init() + the background threads start in _boot(), after the single-instance check:
+# a second launch must never mark the running copy's campaigns as interrupted or send twice.
 
 _PIXEL = (b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04"
           b"\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;")
@@ -159,6 +161,14 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.route("/favicon.ico")
+def favicon():
+    base = app_paths.resource_dir() if app_paths else HERE
+    if not os.path.isfile(os.path.join(base, "mailblaster.ico")):
+        abort(404)
+    return send_from_directory(base, "mailblaster.ico", mimetype="image/x-icon")
+
+
 @app.route("/api/state")
 def api_state():
     st = store.get_settings()
@@ -172,7 +182,7 @@ def api_state():
         "imap_presets": {k: {"host": v[0], "port": v[1], "security": v[2]}
                          for k, v in inbox_sync.IMAP_PRESETS.items()},
         "campaigns": store.campaigns(parent_only=True),
-        "templates": [{"id": t["id"], "name": t["name"], "category": t["category"]} for t in TEMPLATES],
+        "templates": _templates(), "hidden_templates": len(store.hidden_templates()),
         "jobs": jobs, "inbox": store.inbox_counts(), "imap": imap,
         "tunnel": tunnel.status(), "tracking": _tracking_mode()[0],
     })
@@ -183,10 +193,52 @@ def api_dashboard():
     return jsonify(store.dashboard())
 
 
+def _templates():
+    """Built-in templates (minus the ones the user removed) followed by the user's own."""
+    hidden = store.hidden_templates()
+    out = [{"id": t["id"], "name": t["name"], "category": t["category"], "builtin": True}
+           for t in TEMPLATES if t["id"] not in hidden]
+    out += [{"id": f"u{t['id']}", "name": t["name"], "category": t["category"] or "My templates",
+             "builtin": False} for t in store.user_templates()]
+    return out
+
+
 @app.route("/api/templates/<tid>")
 def api_template(tid):
-    t = next((x for x in TEMPLATES if x["id"] == tid), None)
+    if tid.startswith("u") and tid[1:].isdigit():
+        t = next((dict(x, id=f"u{x['id']}") for x in store.user_templates()
+                  if x["id"] == int(tid[1:])), None)
+    else:
+        t = next((x for x in TEMPLATES if x["id"] == tid), None)
     return jsonify(t or {}), (200 if t else 404)
+
+
+@app.route("/api/templates", methods=["POST"])
+def api_template_save():
+    name, html = _s("name"), _s("html")
+    if not name:
+        return jsonify({"ok": False, "error": "Give the template a name."}), 400
+    if not html:
+        return jsonify({"ok": False, "error": "Write the email content first."}), 400
+    tid = store.save_template(name, _s("subject"), html, _s("text"))
+    return jsonify({"ok": True, "id": f"u{tid}"})
+
+
+@app.route("/api/templates/<tid>/delete", methods=["POST"])
+def api_template_delete(tid):
+    if tid.startswith("u") and tid[1:].isdigit():
+        store.delete_template(int(tid[1:]))
+    elif any(t["id"] == tid for t in TEMPLATES):
+        store.set_hidden_templates(store.hidden_templates() | {tid})
+    else:
+        return jsonify({"ok": False, "error": "Template not found."}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/templates/restore", methods=["POST"])
+def api_template_restore():
+    store.set_hidden_templates(set())
+    return jsonify({"ok": True})
 
 
 @app.route("/api/settings", methods=["POST"])
@@ -607,8 +659,22 @@ def api_suppression_add():
 
 @app.route("/api/suppression/remove", methods=["POST"])
 def api_suppression_remove():
-    store.suppression_remove([_s("email")])
-    return jsonify({"ok": True})
+    emails = [e.strip() for e in request.form.getlist("email") if e.strip()]
+    if not emails:
+        return jsonify({"ok": False, "error": "Select at least one address."}), 400
+    store.suppression_remove(emails)
+    return jsonify({"ok": True, "count": len(emails)})
+
+
+@app.route("/api/bounces/delete", methods=["POST"])
+def api_bounces_delete():
+    """Remove entries from the bounce log (the addresses stay on the suppression list)."""
+    if _s("all") == "1":
+        return jsonify({"ok": True, "count": store.bounces_clear()})
+    ids = _ids("ids")
+    if not ids:
+        return jsonify({"ok": False, "error": "Select at least one bounce."}), 400
+    return jsonify({"ok": True, "count": store.bounces_delete(ids)})
 
 
 @app.route("/api/export/suppression.csv")
@@ -711,6 +777,20 @@ def api_inbox_update(iid):
         if it and it.get("contact_id"):
             store.unsubscribe_by_id(it["contact_id"], "reply request")
     return jsonify({"ok": True})
+
+
+@app.route("/api/inbox/delete", methods=["POST"])
+def api_inbox_delete():
+    """Delete messages from MailBlaster only — never from the real mailbox.
+    ids=… deletes those; all=1 empties the current folder (box + search)."""
+    if _s("all") == "1":
+        n = store.inbox_delete_box(_s("box"), _s("q"))
+    else:
+        ids = _ids("ids")
+        if not ids:
+            return jsonify({"ok": False, "error": "Select at least one message."}), 400
+        n = store.inbox_delete(ids)
+    return jsonify({"ok": True, "count": n, "counts": store.inbox_counts()})
 
 
 @app.route("/api/inbox/read-all", methods=["POST"])
@@ -1344,14 +1424,74 @@ def api_campaign_get(cid):
     return jsonify(c)
 
 
-@app.route("/api/campaign/<int:cid>/delete", methods=["POST"])
-def api_campaign_delete(cid):
-    if _is_running(cid):
-        return jsonify({"ok": False, "error": "Stop the campaign before deleting it."}), 400
+def _delete_campaign(cid):
+    """Delete one campaign + its follow-ups. Returns an error message, or None when deleted."""
+    if not store.get_campaign(cid):
+        return None
+    family = store.campaign_family(cid)
+    if any(_is_running(x) for x in family):
+        return "Stop the campaign before deleting it."
     store.delete_campaign(cid)
     with _JOBS_LOCK:
-        JOBS.pop(cid, None)
+        for x in family:
+            JOBS.pop(x, None)
+    return None
+
+
+@app.route("/api/campaign/<int:cid>/delete", methods=["POST"])
+def api_campaign_delete(cid):
+    err = _delete_campaign(cid)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
     return jsonify({"ok": True})
+
+
+@app.route("/api/campaigns/delete", methods=["POST"])
+def api_campaigns_delete():
+    ids = _ids("ids")
+    if not ids:
+        return jsonify({"ok": False, "error": "Select at least one campaign."}), 400
+    deleted, busy = 0, 0
+    for cid in ids:
+        if _delete_campaign(cid):
+            busy += 1
+        else:
+            deleted += 1
+    return jsonify({"ok": True, "count": deleted, "skipped_running": busy})
+
+
+@app.route("/api/data/clear", methods=["POST"])
+def api_data_clear():
+    """Danger zone: wipe one kind of data. Needs confirm=DELETE."""
+    if _s("confirm") != "DELETE":
+        return jsonify({"ok": False, "error": "Type DELETE to confirm."}), 400
+    what = _s("what")
+    if what in ("campaigns", "everything") and _running_count():
+        return jsonify({"ok": False, "error": "Stop all sending campaigns first."}), 400
+    if what == "campaigns":
+        n = store.delete_all_campaigns()
+        with _JOBS_LOCK:
+            JOBS.clear()
+    elif what == "inbox":
+        n = store.inbox_delete_all()
+    elif what == "bounces":
+        n = store.bounces_clear()
+    elif what == "templates":
+        n = sum(store.delete_template(t["id"]) for t in store.user_templates())
+    elif what == "everything":
+        n = store.delete_all_campaigns()
+        with _JOBS_LOCK:
+            JOBS.clear()
+        store.inbox_delete_all()
+        store.bounces_clear()
+        for t in store.user_templates():
+            store.delete_template(t["id"])
+        n += store.delete_all_contacts()
+        for g in store.groups():
+            store.delete_group(g["id"])
+    else:
+        return jsonify({"ok": False, "error": "Unknown data type."}), 400
+    return jsonify({"ok": True, "count": n})
 
 
 @app.route("/api/campaign/<int:cid>/cancel", methods=["POST"])
@@ -1429,13 +1569,57 @@ def _scheduler_loop():
         time.sleep(15)
 
 
-threading.Thread(target=_scheduler_loop, daemon=True).start()
-threading.Thread(target=_imap_loop, daemon=True).start()
+_BOOTED = False
+
+
+def _boot():
+    global _BOOTED
+    if _BOOTED:
+        return
+    _BOOTED = True
+    store.init()
+    threading.Thread(target=_scheduler_loop, daemon=True).start()
+    threading.Thread(target=_imap_loop, daemon=True).start()
+
+
+@app.route("/api/ping")
+def api_ping():
+    return jsonify({"app": "mailblaster", "version": VERSION})
 
 
 @app.errorhandler(413)
 def too_large(e):
     return jsonify({"ok": False, "error": "File too large."}), 413
+
+
+def _port_file():
+    base = app_paths.data_dir() if app_paths else HERE
+    return os.path.join(base, "port.txt")
+
+
+def _running_copy():
+    """URL of a MailBlaster that is already running for this user, or None."""
+    import urllib.request
+    ports = []
+    try:
+        with open(_port_file(), encoding="utf-8") as f:
+            ports.append(int(f.read().strip()))
+    except Exception:
+        pass
+    ports += [p for p in range(5055, 5075) if p not in ports]
+    import socket
+    for p in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
+            if s.connect_ex(("127.0.0.1", p)) != 0:
+                continue
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{p}/api/ping", timeout=2) as r:
+                if json.loads(r.read().decode("utf-8")).get("app") == "mailblaster":
+                    return f"http://127.0.0.1:{p}"
+        except Exception:
+            continue
+    return None
 
 
 def _pick_port(preferred):
@@ -1470,15 +1654,29 @@ if __name__ == "__main__":
     # never crash on a missing stdout.
     if frozen or sys.stdout is None:
         _redirect_logs_to_file()
+    open_browser = os.environ.get("MB_NO_BROWSER") != "1"
+    if not os.environ.get("PORT") and not os.environ.get("MB_DB"):
+        existing = _running_copy()
+        if existing:                       # second click on the shortcut: just show the app
+            if open_browser:
+                import webbrowser
+                webbrowser.open(existing)
+            sys.exit(0)
+    _boot()
     port = int(os.environ.get("PORT", "0")) or _pick_port(5055)
     LOCAL_URL = f"http://127.0.0.1:{port}"
+    try:
+        with open(_port_file(), "w", encoding="utf-8") as f:
+            f.write(str(port))
+    except Exception:
+        pass
     if store.get_settings().get("track_mode") == "auto":
         store.save_settings({"track_base": ""})          # old address is gone
         tunnel.start(port, _tunnel_url)
     import atexit
     atexit.register(tunnel.stop)
     print(f"\n  MailBlaster  ->  http://127.0.0.1:{port}\n")
-    if os.environ.get("MB_NO_BROWSER") != "1":
+    if open_browser:
         def _open():
             import time
             import webbrowser
@@ -1489,3 +1687,5 @@ if __name__ == "__main__":
                 pass
         threading.Thread(target=_open, daemon=True).start()
     app.run(host="127.0.0.1", port=port, threaded=True, debug=False)
+else:
+    _boot()          # imported (tests / WSGI): behave as before
