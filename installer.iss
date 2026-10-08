@@ -3,7 +3,7 @@
 ; Build: powershell -ExecutionPolicy Bypass -File build.ps1   (stages build_embed\ then runs ISCC)
 
 #define MyAppName "MailBlaster"
-#define MyAppVersion "3.1.0"
+#define MyAppVersion "3.2.0"
 #define MyAppPublisher "MailBlaster"
 
 [Setup]

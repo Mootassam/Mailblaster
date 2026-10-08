@@ -30,6 +30,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import store  # noqa: E402
 import mailer  # noqa: E402
+import verifier  # noqa: E402
 import inbox_sync  # noqa: E402
 import tunnel  # noqa: E402
 from templates_data import TEMPLATES  # noqa: E402
@@ -44,7 +45,7 @@ except Exception:  # running from source without the helper
 if os.environ.get("MB_DB"):          # alternate database (testing / multiple workspaces)
     store.set_db_path(os.environ["MB_DB"])
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 app = Flask(__name__, static_folder=_STATIC)
 app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024
 # store.init() + the background threads start in _boot(), after the single-instance check:
@@ -594,41 +595,138 @@ def api_unsub():
     return jsonify({"ok": store.unsubscribe(_s("email"), "manual")})
 
 
-# ---- validation job ---- #
-VALIDATE = {"status": "idle", "total": 0, "done": 0, "invalid": 0}
+# ---- verification job ---- #
+# One pass at a time. Addresses are graded into deliverable / risky /
+# undeliverable / unknown (see verifier.py). Undeliverable ones are marked
+# invalid by store.set_contact_verify so campaigns skip them automatically.
+VERIFY = {"status": "idle", "total": 0, "done": 0, "deliverable": 0, "risky": 0,
+          "undeliverable": 0, "unknown": 0, "scope": "", "deep": 0, "started": 0}
 _VLOCK = threading.Lock()
+_VSTOP = threading.Event()
 
 
-def _run_validate(check_mx):
-    emails = store.all_active_emails()
+def _verify_mail_from():
+    """A real-looking MAIL FROM for SMTP probes — use a configured sender so the
+    probe comes from the same domain you actually send with."""
+    for a in store.accounts(hide_pw=False):
+        if a.get("from_email"):
+            return a["from_email"]
+    return "verify@example.com"
+
+
+def _dom_lock(dom_locks, lock, domain):
+    with lock:
+        l = dom_locks.get(domain)
+        if l is None:
+            l = threading.Lock()
+            dom_locks[domain] = l
+        return l
+
+
+def _run_verify(targets, deep, scope_label):
+    from concurrent.futures import ThreadPoolExecutor
+    cache, clock, dom_locks = {}, threading.Lock(), {}
+    mail_from = _verify_mail_from()
+    helo = mail_from.split("@")[-1] if "@" in mail_from else "mail.local"
+    _VSTOP.clear()
     with _VLOCK:
-        VALIDATE.update(status="running", total=len(emails), done=0, invalid=0)
-    inv = 0
-    for cid, email in emails:
-        ok, why = mailer.validate_email(email, check_mx=check_mx)
-        if not ok:
-            store.set_status(cid, "invalid", why)
-            inv += 1
+        VERIFY.update(status="running", total=len(targets), done=0, deliverable=0,
+                      risky=0, undeliverable=0, unknown=0, scope=scope_label,
+                      deep=1 if deep else 0, started=time.time())
+
+    def work(item):
+        cid, email = item
+        if _VSTOP.is_set():
+            return
+        domain = email.split("@")[-1] if "@" in email else email
+        try:
+            with _dom_lock(dom_locks, clock, domain):
+                res = verifier.verify_one(email, mail_from=mail_from, helo_name=helo,
+                                          deep=deep, cache=cache)
+        except Exception as e:                       # never let one address kill the pass
+            res = {"result": "unknown", "reason": f"checker error: {e}"[:150], "score": 50}
+        try:
+            store.set_contact_verify(cid, res["result"], res.get("reason", ""),
+                                     res.get("score", 0))
+        except Exception:
+            pass
         with _VLOCK:
-            VALIDATE["done"] += 1
-            VALIDATE["invalid"] = inv
+            VERIFY["done"] += 1
+            VERIFY[res["result"]] = VERIFY.get(res["result"], 0) + 1
+
+    try:
+        workers = 10 if deep else 16
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            list(ex.map(work, targets))
+    finally:
+        with _VLOCK:
+            VERIFY["status"] = "stopped" if _VSTOP.is_set() else "done"
+
+
+def _start_verify(targets, deep, scope_label):
     with _VLOCK:
-        VALIDATE["status"] = "done"
+        if VERIFY["status"] == "running":
+            return False
+    threading.Thread(target=_run_verify, args=(targets, deep, scope_label),
+                     daemon=True).start()
+    return True
 
 
+@app.route("/api/verify/start", methods=["POST"])
+def api_verify_start():
+    scope = _s("scope", "all")
+    group_ids = _ids("group_ids") if scope == "groups" else None
+    exclude = _ids("exclude_group_ids") if scope == "groups" else None
+    deep = _s("deep", "1") != "0"
+    only_unverified = _s("only_unverified", "0") == "1"
+    targets = store.verify_targets(group_ids, exclude, only_unverified)
+    if not targets:
+        return jsonify({"ok": False, "error": "No contacts to verify in this selection."}), 400
+    label = "selected groups" if scope == "groups" and group_ids else "all contacts"
+    if not _start_verify(targets, deep, label):
+        return jsonify({"ok": False, "error": "A verification pass is already running."}), 400
+    return jsonify({"ok": True, "total": len(targets), "deep": deep})
+
+
+@app.route("/api/verify/status")
+def api_verify_status():
+    with _VLOCK:
+        return jsonify(dict(VERIFY))
+
+
+@app.route("/api/verify/stop", methods=["POST"])
+def api_verify_stop():
+    _VSTOP.set()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/verify/precheck")
+def api_verify_precheck():
+    """Used by the campaign composer: how verified are the chosen recipients?"""
+    group_ids = _ids("group_ids") or None
+    exclude = _ids("exclude_group_ids") or None
+    st = store.verify_stats(group_ids, exclude)
+    st["recipients"] = store.recipient_count(group_ids, exclude)
+    with _VLOCK:
+        st["running"] = VERIFY["status"] == "running"
+    return jsonify(st)
+
+
+# back-compat: the old syntax+MX list check (no deep SMTP probe)
 @app.route("/api/validate", methods=["POST"])
 def api_validate():
-    with _VLOCK:
-        if VALIDATE["status"] == "running":
-            return jsonify({"ok": False, "error": "Already running."}), 400
-    threading.Thread(target=_run_validate, args=(_s("check_mx", "1") == "1",), daemon=True).start()
+    targets = store.verify_targets(None, None, False)
+    if not _start_verify(targets, False, "all contacts"):
+        return jsonify({"ok": False, "error": "Already running."}), 400
     return jsonify({"ok": True})
 
 
 @app.route("/api/validate/status")
 def api_validate_status():
     with _VLOCK:
-        return jsonify(dict(VALIDATE))
+        v = dict(VERIFY)
+    return jsonify({"status": v["status"], "total": v["total"], "done": v["done"],
+                    "invalid": v["undeliverable"]})
 
 
 @app.route("/api/spam-check", methods=["POST"])

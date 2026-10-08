@@ -109,7 +109,11 @@ def init():
         """)
         _add_cols(c, "contacts", [("replied_at", "REAL DEFAULT 0"),
                                   ("soft_bounces", "INTEGER DEFAULT 0"),
-                                  ("status_reason", "TEXT DEFAULT ''")])
+                                  ("status_reason", "TEXT DEFAULT ''"),
+                                  ("verify_status", "TEXT DEFAULT ''"),
+                                  ("verify_reason", "TEXT DEFAULT ''"),
+                                  ("verify_score", "INTEGER DEFAULT 0"),
+                                  ("verify_at", "REAL DEFAULT 0")])
         _add_cols(c, "lists", [("color", "TEXT DEFAULT ''")])
         _add_cols(c, "accounts", [
             ("imap_enabled", "INTEGER DEFAULT 0"), ("imap_host", "TEXT DEFAULT ''"),
@@ -139,6 +143,7 @@ def init():
             CREATE INDEX IF NOT EXISTS idx_lm ON list_members(list_id);
             CREATE INDEX IF NOT EXISTS idx_lm_c ON list_members(contact_id);
             CREATE INDEX IF NOT EXISTS idx_ct_status ON contacts(status);
+            CREATE INDEX IF NOT EXISTS idx_ct_verify ON contacts(verify_status);
             CREATE INDEX IF NOT EXISTS idx_inbox_ts ON inbox(received_at);
             CREATE INDEX IF NOT EXISTS idx_bounce_c ON bounces(campaign_id);
         """)
@@ -740,6 +745,67 @@ def find_contact(email):
     with _LOCK, _conn() as c:
         r = c.execute("SELECT * FROM contacts WHERE email=?", ((email or "").strip().lower(),)).fetchone()
     return dict(r) if r else None
+
+
+# --------------------------- verification ----------------------------------- #
+def verify_targets(group_ids=None, exclude_group_ids=None, only_unverified=False):
+    """Active contacts to verify. Scope = chosen groups (none = everyone),
+    minus excluded groups. only_unverified skips ones already checked."""
+    w, args = _recipient_sql(group_ids, exclude_group_ids)
+    if only_unverified:
+        w += " AND (c.verify_status='' OR c.verify_status='unknown')"
+    with _LOCK, _conn() as c:
+        return [(r["id"], r["email"]) for r in
+                c.execute(f"SELECT c.id,c.email FROM contacts c WHERE {w} ORDER BY c.id", args)]
+
+
+def set_contact_verify(cid, status, reason="", score=0, to_invalid=True):
+    """Store a verification result. `undeliverable` addresses are marked invalid
+    so campaigns skip them (they can be reactivated later); everyone else keeps
+    their status and just carries the verify_status tag."""
+    with _LOCK, _conn() as c:
+        if status == "undeliverable" and to_invalid:
+            c.execute("UPDATE contacts SET verify_status=?,verify_reason=?,verify_score=?,"
+                      "verify_at=?,status='invalid',status_reason=? WHERE id=? AND status='active'",
+                      (status, reason, int(score), time.time(), (reason or "undeliverable")[:200], cid))
+        else:
+            c.execute("UPDATE contacts SET verify_status=?,verify_reason=?,verify_score=?,"
+                      "verify_at=? WHERE id=?",
+                      (status, reason, int(score), time.time(), cid))
+
+
+def verify_stats(group_ids=None, exclude_group_ids=None):
+    """Bucket counts for a scope. `undeliverable` counts the invalid contacts
+    we flagged (they're no longer 'active'); the rest are among active ones."""
+    w, args = _recipient_sql(group_ids, exclude_group_ids)
+    # active recipients broken down by verify tag
+    with _LOCK, _conn() as c:
+        rows = {r[0] or "unverified": r[1] for r in c.execute(
+            f"SELECT verify_status,COUNT(*) FROM contacts c WHERE {w} GROUP BY verify_status", args)}
+        # undeliverable ones were moved to status='invalid' — count them in-scope too
+        wi, ai = _verify_scope_any(group_ids, exclude_group_ids)
+        undeliverable = c.execute(
+            f"SELECT COUNT(*) FROM contacts c WHERE {wi} AND c.status='invalid' "
+            f"AND c.verify_status='undeliverable'", ai).fetchone()[0]
+    active = sum(rows.values())
+    return {"deliverable": rows.get("deliverable", 0), "risky": rows.get("risky", 0),
+            "unknown": rows.get("unknown", 0), "unverified": rows.get("unverified", 0),
+            "undeliverable": undeliverable, "active": active}
+
+
+def _verify_scope_any(group_ids=None, exclude_group_ids=None):
+    """Same group scoping as _recipient_sql but without the status='active' filter,
+    so we can also see contacts we moved to 'invalid'."""
+    where, args = ["1=1"], []
+    if group_ids:
+        where.append(f"c.id IN (SELECT contact_id FROM list_members WHERE list_id IN "
+                     f"({','.join('?' * len(group_ids))}))")
+        args += list(group_ids)
+    if exclude_group_ids:
+        where.append(f"c.id NOT IN (SELECT contact_id FROM list_members WHERE list_id IN "
+                     f"({','.join('?' * len(exclude_group_ids))}))")
+        args += list(exclude_group_ids)
+    return " AND ".join(where), args
 
 
 def unsubscribe(email, reason="unsubscribed"):

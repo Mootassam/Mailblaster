@@ -42,7 +42,7 @@ Copy-Item -Recurse (Join-Path $root "static") (Join-Path $app "static")
 New-Item -ItemType File (Join-Path $app ".installed") | Out-Null   # data goes to %LOCALAPPDATA%\MailBlaster
 
 # smoke test: the staged runtime must import every module the app needs
-$check = "import sys; sys.path.insert(0, r'$app'); import flask, dns.resolver, store, mailer, inbox_sync, tunnel, templates_data, app_paths; print('imports ok')"
+$check = "import sys; sys.path.insert(0, r'$app'); import flask, dns.resolver, store, mailer, verifier, inbox_sync, tunnel, templates_data, app_paths; print('imports ok')"
 & (Join-Path $rt "python.exe") -c $check
 if ($LASTEXITCODE -ne 0) { throw "staged runtime cannot import the app" }
 Get-ChildItem $stage -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force

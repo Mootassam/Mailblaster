@@ -696,6 +696,27 @@ function stepSend(box) {
   const sendBtnUpd = () => { sendBtn.replaceChildren(icon(CB.schedule ? 'calendar' : 'send', 17), CB.schedule ? 'Schedule campaign' : 'Launch campaign'); }; sendBtnUpd();
   const groupsTxt = CB.group_ids.length ? (APP.state.groups || []).filter(g => CB.group_ids.includes(g.id)).map(g => g.name).join(', ') : 'All active contacts';
   const exTxt = (APP.state.groups || []).filter(g => CB.exclude_group_ids.includes(g.id)).map(g => g.name).join(', ');
+  const vcBody = h('div', { class: 'card-b' }, h('div', { class: 'small muted' }, 'Checking current status…'));
+  const refreshPrecheck = async () => {
+    const q = `group_ids=${CB.group_ids.join(',')}&exclude_group_ids=${CB.exclude_group_ids.join(',')}`;
+    const s = await GET('/api/verify/precheck?' + q) || {};
+    const total = s.recipients || 0, unv = s.unverified || 0;
+    vcBody.replaceChildren(
+      h('div', { class: 'hstack', style: 'gap:8px;flex-wrap:wrap;margin-bottom:12px' },
+        s.deliverable ? pill(fmt(s.deliverable) + ' good', 'g') : null,
+        s.risky ? pill(fmt(s.risky) + ' risky', 'a') : null,
+        unv ? pill(fmt(unv) + ' not checked', '') : null,
+        s.undeliverable ? pill(fmt(s.undeliverable) + ' removed', 'r') : null),
+      unv ? banner('warn', `${fmt(unv)} of ${fmt(total)} recipients haven’t been verified. Verify now to drop dead addresses before they bounce.`)
+        : (total ? banner('ok', 'All recipients are verified — good to send.') : h('div', { class: 'small muted' }, 'No recipients selected yet.')),
+      h('div', { style: 'margin-top:12px' }, btn('Verify recipients', {
+        icon: 'mailcheck', onclick: () => verifyModal({
+          group_ids: CB.group_ids, exclude_group_ids: CB.exclude_group_ids, count: total, label: 'this campaign',
+          onDone: () => { refreshCount(null); refreshPrecheck(); const rc = $('#send-rcpt'); if (rc) rc.textContent = CB.count == null ? '…' : fmt(CB.count); }
+        })
+      })));
+  };
+  refreshPrecheck();
   box.append(h('div', { class: 'split' },
     h('div', {},
       card('Senders', 'Pick the accounts that send this campaign. Volume rotates between them and every daily limit / warm-up step is respected.', null, h('div', { class: 'card-b' }, accBox, h('div', { style: 'margin-top:12px' }, capEl))),
@@ -706,13 +727,14 @@ function stepSend(box) {
       card('Follow-up sequence', 'Automatic follow-ups — the #1 way to get more replies. Anyone who replies is removed from the sequence automatically.', btn('Add step', { size: 'sm', icon: 'plus', onclick: () => { CB.followups.push({ delay_hours: String(48 * (CB.followups.length + 1)), subject: 'Re: ' + CB.subject, html: CB.html, text: '', send_to: 'non_openers' }); renderFU(); } }),
         h('div', { class: 'card-b' }, fuList, CB.followups.length ? null : h('div', { class: 'muted small' }, 'No follow-ups. Add one to automatically nudge people who didn’t respond.')))),
     h('div', {},
+      card('Clean the list', 'Verify these recipients before sending — drop dead addresses to cut bounces and protect your sender reputation.', null, vcBody),
       card('Safety', null, null, h('div', { class: 'card-b' },
         toggle('Safety brakes', CB.brakes, v => CB.brakes = v, 'Auto-pause if bounces, complaints, unsubscribes or failures spike'),
         h('div', { class: 'help', style: 'margin-top:10px' }, 'Thresholds are set on the Deliverability page. Senders that fail repeatedly are paused automatically, and the campaign keeps going on the others.'))),
       card('Review', null, null, h('div', { class: 'card-b' }, h('dl', { class: 'review' },
         h('dt', {}, 'Campaign'), h('dd', {}, CB.name || 'Campaign'), h('dt', {}, 'Subject'), h('dd', {}, CB.subject + (CB.ab ? '  /  B: ' + CB.subject_b : '')),
         h('dt', {}, 'Audience'), h('dd', {}, groupsTxt, exTxt ? h('div', { class: 'xs muted' }, 'Excluding: ' + exTxt) : null),
-        h('dt', {}, 'Recipients'), h('dd', {}, CB.count == null ? '…' : fmt(CB.count)), h('dt', {}, 'Follow-ups'), h('dd', {}, CB.followups.length ? CB.followups.length + ' step(s)' : 'None')),
+        h('dt', {}, 'Recipients'), h('dd', { id: 'send-rcpt' }, CB.count == null ? '…' : fmt(CB.count)), h('dt', {}, 'Follow-ups'), h('dd', {}, CB.followups.length ? CB.followups.length + ' step(s)' : 'None')),
         h('div', { style: 'margin-top:18px' }, sendBtn), h('div', { class: 'xs muted', style: 'margin-top:8px' }, 'Every email includes a working unsubscribe link and one-click List-Unsubscribe header.'))))),
     h('div', { style: 'margin-top:4px' }, btn('Back', { icon: 'left', onclick: () => { CB.step = 2; renderStep(); } })));
 }
@@ -929,6 +951,11 @@ async function syncInbox(b) {
 /* ================================================================== CONTACTS */
 const CQ = { q: '', status: '', group: '', page: 0, per: 50, sel: new Set(), all: false, rows: [], total: 0 };
 function statusPillC(s) { const m = { active: ['Active', 'g'], unsubscribed: ['Unsubscribed', 'm'], bounced: ['Bounced', 'r'], invalid: ['Invalid', 'a'] }[s] || [s, 'm']; return pill(m[0], m[1]); }
+function verifyPill(d) {
+  const m = { deliverable: ['✓ Deliverable', 'g'], risky: ['Risky', 'a'], undeliverable: ['Undeliverable', 'r'], unknown: ['Unverifiable', 'm'] }[d && d.verify_status];
+  if (!m) return null;
+  const p = pill(m[0], m[1]); if (d.verify_reason) p.title = d.verify_reason; return p;
+}
 async function viewContacts() {
   await loadState();
   const v = $('#view'), c = APP.state.contacts || {};
@@ -1009,7 +1036,7 @@ function renderContactMain(main) {
     [['', 'Any status'], ['active', 'Active'], ['replied', 'Replied'], ['unsubscribed', 'Unsubscribed'], ['bounced', 'Bounced'], ['invalid', 'Invalid']].map(([v, l]) => h('option', { value: v, selected: CQ.status === v }, l)));
   const more = iconBtn('dots', 'More', e => openMenu(e.currentTarget, [
     { label: 'Export these contacts (CSV)', icon: 'download', onclick: () => location.href = `/api/export/contacts.csv?q=${encodeURIComponent(CQ.q)}&status=${CQ.status}&group=${CQ.group}` },
-    { label: 'Verify all emails (MX check)', icon: 'mailcheck', onclick: () => verifyModal() },
+    { label: 'Verify email addresses', icon: 'mailcheck', onclick: () => verifyModal() },
     g ? { label: 'Send campaign to this group', icon: 'send', onclick: () => newCampaign({ group_ids: [g.id], name: g.name + ' campaign' }) } : null,
     'sep',
     { label: 'Delete ALL contacts…', icon: 'trash', danger: true, onclick: () => deleteAllContacts() },
@@ -1166,7 +1193,7 @@ async function contactModal(id) {
   const gsel = h('select', { style: 'width:auto;min-height:31px;font-size:12.5px' }, h('option', { value: '' }, '＋ Add to group'), (APP.state.groups || []).filter(g => !(d.groups || []).some(x => x.id === g.id)).map(g => h('option', { value: g.id }, g.name)));
   gsel.addEventListener('change', async () => { if (!gsel.value) return; await POST('/api/contacts/bulk', { action: 'add_group', ids: id, group_id: gsel.value }); toast('Added to group.'); m.close(); await loadState(); contactModal(id); if (APP.view === 'contacts') { renderGroupPanel(); loadContacts(); } });
   const m = modal({ title: nm || d.email, icon: 'user', wide: true, body: h('div', {},
-    h('div', { class: 'hstack', style: 'margin-bottom:14px' }, avatar(nm, d.email, 44), h('div', { style: 'flex:1' }, h('div', { class: 'b' }, d.email), h('div', { class: 'hstack', style: 'margin-top:4px' }, statusPillC(d.status), d.status_reason ? h('span', { class: 'xs muted' }, d.status_reason) : null, d.replied_at ? pill('Replied ' + timeAgo(d.replied_at), 's') : null))),
+    h('div', { class: 'hstack', style: 'margin-bottom:14px' }, avatar(nm, d.email, 44), h('div', { style: 'flex:1' }, h('div', { class: 'b' }, d.email), h('div', { class: 'hstack', style: 'margin-top:4px' }, statusPillC(d.status), d.status_reason ? h('span', { class: 'xs muted' }, d.status_reason) : null, verifyPill(d), d.replied_at ? pill('Replied ' + timeAgo(d.replied_at), 's') : null))),
     h('div', { class: 'hstack', style: 'margin-bottom:16px' }, (d.groups || []).map(g => h('span', { class: 'chip' }, h('span', { class: 'dot', style: 'background:' + g.color }), h('span', { class: 't' }, g.name),
       h('span', { style: 'cursor:pointer;display:inline-flex', title: 'Remove from group', onclick: async () => { await POST('/api/contacts/bulk', { action: 'remove_group', ids: id, group_id: g.id }); toast('Removed from group.'); m.close(); await loadState(); contactModal(id); if (APP.view === 'contacts') { renderGroupPanel(); loadContacts(); } } }, icon('x', 12)))), gsel),
     h('div', { class: 'grid g2', style: 'align-items:start' },
@@ -1186,15 +1213,59 @@ async function deleteAllContacts() {
   const r = await POST('/api/contacts/delete-all', { confirm: 'DELETE' });
   if (!r.ok) return toast(r.error, 'err'); toast(`Deleted ${fmt(r.count)} contacts.`); clearSel(); CQ.page = 0; await loadState(); viewContacts();
 }
-function verifyModal() {
-  const bar = h('div', { class: 'pbar lg' }, h('div', { style: 'width:0' })), info = h('div', { class: 'small muted', style: 'margin-top:8px' }, 'Checks every active address for valid syntax and a real mail server (MX record). Bad addresses are marked invalid so they never bounce.');
+const VERIFY_BUCKETS = [
+  ['deliverable', 'Deliverable', '#10b981', 'var(--green-l)'],
+  ['risky', 'Risky', '#f59e0b', 'var(--amber-l)'],
+  ['undeliverable', 'Undeliverable', '#ef4444', 'var(--red-l)'],
+  ['unknown', 'Unknown', '#64748b', '#eef1f6'],
+];
+function verifyModal(scope) {
+  // scope (optional): { group_ids, exclude_group_ids, label } — verify just a
+  // campaign's recipients. No scope = verify every active contact.
+  const scoped = !!(scope && scope.group_ids && scope.group_ids.length);
+  const bar = h('div', { class: 'pbar lg' }, h('div', { style: 'width:0' }));
+  const info = h('div', { class: 'small muted', style: 'margin-top:10px' },
+    scoped ? `Checking the ${fmt(scope.count || 0)} recipients of ${scope.label || 'this campaign'}.`
+      : 'Checks every active contact. Undeliverable addresses are marked invalid so your campaigns skip them automatically.');
+  const tiles = h('div', { class: 'grid g4', style: 'margin:14px 0 2px' }, VERIFY_BUCKETS.map(([k, l, c, bg]) =>
+    h('div', { class: 'ktile', id: 'vb-' + k, style: `--kc:${c};--kb:${bg}` },
+      h('div', { class: 'kv', id: 'vn-' + k }, '0'), h('div', { class: 'kl' }, l))));
+  const setTiles = s => VERIFY_BUCKETS.forEach(([k]) => { const e = $('#vn-' + k); if (e) e.textContent = fmt(s[k] || 0); });
+
+  let deep = true, onlyNew = true;
+  const deepTog = toggle('Deep check (ask each mail server if the mailbox exists)', deep, v => deep = v,
+    'Most accurate. A little slower, and some networks block it — then it safely falls back to domain checks.');
+  const newTog = toggle('Only check addresses not verified yet', onlyNew, v => onlyNew = v);
+
+  const stopBtn = btn('Stop', { kind: 'quiet', icon: 'x', onclick: async () => { await POST('/api/verify/stop'); } });
+  stopBtn.style.display = 'none';
   const start = btn('Start verification', { kind: 'primary', icon: 'mailcheck', onclick: async () => {
-    start.disabled = true; const r = await POST('/api/validate', { check_mx: 1 }); if (!r.ok && r.error) toast(r.error, 'warn');
-    const poll_ = async () => { const s = await GET('/api/validate/status'); const p = s.total ? s.done / s.total * 100 : 0; bar.firstChild.style.width = p + '%'; info.textContent = `Checked ${fmt(s.done)} of ${fmt(s.total)} · ${fmt(s.invalid)} invalid found`;
-      if (s.status === 'running') setTimeout(poll_, 800); else { info.textContent = `Done — ${fmt(s.invalid)} invalid addresses cleaned out of ${fmt(s.total)}.`; start.disabled = false; await loadState(); if (APP.view === 'contacts') viewContacts(); } };
+    start.disabled = true; stopBtn.style.display = ''; info.textContent = 'Starting…';
+    const body = { deep: deep ? 1 : 0, only_unverified: onlyNew ? 1 : 0 };
+    if (scoped) { body.scope = 'groups'; body.group_ids = scope.group_ids; body.exclude_group_ids = scope.exclude_group_ids || []; }
+    else body.scope = 'all';
+    const r = await POST('/api/verify/start', body);
+    if (!r.ok) { start.disabled = false; stopBtn.style.display = 'none'; return toast(r.error || 'Could not start.', 'warn'); }
+    const poll_ = async () => {
+      const s = await GET('/api/verify/status'); const p = s.total ? s.done / s.total * 100 : 0;
+      bar.firstChild.style.width = p + '%'; setTiles(s);
+      info.textContent = `Checked ${fmt(s.done)} of ${fmt(s.total)}${s.deep ? ' · deep check' : ''}…`;
+      if (s.status === 'running') setTimeout(poll_, 700);
+      else {
+        bar.firstChild.style.width = '100%'; setTiles(s); start.disabled = false; stopBtn.style.display = 'none';
+        info.textContent = (s.status === 'stopped' ? 'Stopped. ' : 'Done. ') +
+          `${fmt(s.undeliverable || 0)} undeliverable removed from sending, ${fmt(s.risky || 0)} risky, ${fmt(s.deliverable || 0)} good.`;
+        await loadState(); if (APP.view === 'contacts') viewContacts();
+        if (scope && scope.onDone) scope.onDone(s);
+      }
+    };
     poll_();
   } });
-  const m = modal({ title: 'Verify email addresses', icon: 'mailcheck', body: h('div', {}, bar, info), footer: [btn('Close', { onclick: () => m.close() }), start] });
+  const m = modal({ title: scoped ? 'Verify recipients' : 'Verify email addresses', icon: 'mailcheck', wide: true,
+    body: h('div', {}, info, tiles, bar, h('div', { class: 'vstack', style: 'margin-top:16px;gap:12px' }, deepTog, newTog),
+      h('div', { class: 'xs muted', style: 'margin-top:12px' }, 'Deliverable = safe to send · Risky = sendable but lower confidence (catch-all / role inbox) · Undeliverable = will bounce · Unknown = couldn’t tell.')),
+    footer: [btn('Close', { onclick: () => m.close() }), stopBtn, start] });
+  return m;
 }
 
 /* ================================================================== TEMPLATES */
