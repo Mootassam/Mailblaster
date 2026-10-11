@@ -1,4 +1,4 @@
-; MailBlaster installer — ships the official, digitally signed Python runtime (Python Software
+﻿; MailBlaster installer â€” ships the official, digitally signed Python runtime (Python Software
 ; Foundation) with the app, so Windows Smart App Control can verify what it runs.
 ; Build: powershell -ExecutionPolicy Bypass -File build.ps1   (stages build_embed\ then runs ISCC)
 
@@ -20,7 +20,7 @@ LicenseFile=LICENSE.txt
 OutputDir=installer_output
 OutputBaseFilename=MailBlaster-Setup
 Compression=lzma2/max
-SolidCompression=yes
+SolidCompression=no
 WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
