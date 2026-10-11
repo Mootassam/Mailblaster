@@ -332,6 +332,11 @@ class SMTPSender:
                 if 500 <= e.smtp_code < 600:          # permanent — retrying won't help
                     if kind == "blocked":
                         raise MailerError(f"Blocked by receiving server ({e.smtp_code} {txt})"[:300])
+                    # A 5xx after RCPT was accepted is about the message or the sender (bad Reply-To,
+                    # unverified domain, relay policy…) unless the text names the recipient — never
+                    # mark the contact bounced for a problem in the sender's own setup.
+                    if not _UNKNOWN_RE.search(txt):
+                        raise MailerError(f"Message refused by the sending server ({e.smtp_code} {txt})"[:300])
                     raise RecipientError(f"{e.smtp_code} {txt}"[:300], kind, e.smtp_code)
                 last = e
                 try:

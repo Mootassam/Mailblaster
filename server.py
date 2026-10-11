@@ -18,6 +18,7 @@ import html as _html
 import io
 import json
 import os
+import re
 import random
 import sys
 import threading
@@ -364,11 +365,27 @@ def _acc_form():
     return {k: request.form.get(k, "").strip() for k in _ACC_FORM if k in request.form}
 
 
+_ADDR_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+
+
+def _acc_address_error(d):
+    """Sending services reject every email with a malformed From / Reply-to — catch it on save."""
+    if d.get("from_email") and not _ADDR_RE.match(d["from_email"]):
+        return f"From email “{d['from_email']}” isn't a valid address (e.g. you@yourdomain.com)."
+    if d.get("reply_to") and not _ADDR_RE.match(d["reply_to"]):
+        return (f"Reply-to “{d['reply_to']}” isn't a valid email address — use a full address "
+                "like hello@yourdomain.com, or leave it empty.")
+    return ""
+
+
 @app.route("/api/accounts", methods=["POST"])
 def api_add_account():
     d = _acc_form()
     if not d.get("host") or not d.get("from_email"):
         return jsonify({"ok": False, "error": "SMTP host and From email are required."}), 400
+    bad = _acc_address_error(d)
+    if bad:
+        return jsonify({"ok": False, "error": bad}), 400
     return jsonify({"ok": True, "id": store.add_account(d)})
 
 
@@ -377,7 +394,11 @@ def api_update_account(aid):
     if _s("_delete") == "1":
         store.delete_account(aid)
         return jsonify({"ok": True})
-    store.update_account(aid, _acc_form())
+    d = _acc_form()
+    bad = _acc_address_error(d)
+    if bad:
+        return jsonify({"ok": False, "error": bad}), 400
+    store.update_account(aid, d)
     return jsonify({"ok": True})
 
 
