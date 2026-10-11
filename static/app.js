@@ -1346,7 +1346,7 @@ async function removeSender(a) {
   const r = await POST('/api/accounts/' + a.id, { _delete: 1 }); if (r.ok === false) return toast(r.error, 'err');
   toast('Sender removed.'); await loadState(); go('senders');
 }
-const PRESET_NAMES = { gmail: 'Gmail', outlook: 'Outlook / 365', yahoo: 'Yahoo', zoho: 'Zoho', sendgrid: 'SendGrid', mailgun: 'Mailgun', ses: 'Amazon SES', brevo: 'Brevo' };
+const PRESET_NAMES = { gmail: 'Gmail', outlook: 'Outlook / 365', yahoo: 'Yahoo', zoho: 'Zoho', sendgrid: 'SendGrid', mailgun: 'Mailgun', ses: 'Amazon SES', brevo: 'Brevo', resend: 'Resend' };
 function senderForm(id) {
   const a = id ? (APP.state.accounts || []).find(x => x.id === id) || {} : {};
   const P = APP.state.presets || {}, IP = APP.state.imap_presets || {};
@@ -1358,7 +1358,10 @@ function senderForm(id) {
   const user = I('username', { placeholder: 'you@gmail.com' }), pass = h('input', { type: 'password', placeholder: id ? '•••••• (leave blank to keep)' : 'App password' });
   const fname = I('from_name', { placeholder: 'Your Name' }), femail = I('from_email', { placeholder: 'you@yourdomain.com' }), reply = I('reply_to', { placeholder: 'optional' });
   const limit = I('daily_limit', { type: 'number', def: 500 });
-  const preset = h('div', { class: 'hstack' }, Object.keys(P).filter(k => k !== 'custom').map(k => h('button', { class: 'lbtn', type: 'button', onclick: () => { host.value = P[k].host; port.value = P[k].port; sec.value = P[k].security; ihost.value = ''; autoImap(); } }, PRESET_NAMES[k] || k)));
+  const preset = h('div', { class: 'hstack' }, Object.keys(P).filter(k => k !== 'custom').map(k => h('button', { class: 'lbtn', type: 'button', onclick: () => { host.value = P[k].host; port.value = P[k].port; sec.value = P[k].security; ihost.value = ''; autoImap();
+    if (P[k].username) user.value = P[k].username; else if (user.value === 'resend') user.value = '';
+    if (!id) pass.placeholder = P[k].password_hint || 'App password';
+    if (P[k].note) toast(P[k].note, 'info', 9000); } }, PRESET_NAMES[k] || k)));
   // warm-up
   let wOn = !!a.warmup_enabled; const wStart = I('warmup_start', { type: 'number', def: 20, min: 1 }), wGrowth = I('warmup_growth', { type: 'number', def: 20, min: 1 });
   const ramp = h('div'); const wBox = h('div', { style: wOn ? '' : 'display:none' });
@@ -1400,7 +1403,7 @@ function senderForm(id) {
     sec_('server', 'SMTP connection', 'Where your email is sent from', h('label', { class: 'f' }, 'Quick setup'), preset,
       h('div', { class: 'row' }, field('SMTP host', host), field('Port', port), field('Security', sec)),
       h('div', { class: 'row' }, field('Username', user), field('Password', pass)),
-      h('div', { style: 'margin-top:12px' }, banner('info', 'Gmail/Outlook need an “app password” (not your normal password). For more than ~2,000/day use SendGrid, Mailgun, Amazon SES or Brevo — or add several senders.'))),
+      h('div', { style: 'margin-top:12px' }, banner('info', 'Gmail/Outlook need an “app password” (not your normal password). For more than ~2,000/day use Resend, SendGrid, Mailgun, Amazon SES or Brevo — or add several senders.'))),
     sec_('user', 'Sender identity', 'What recipients see', h('div', { class: 'row' }, field('From name', fname), field('From email', femail), field('Reply-to', reply, 'optional')), field('Label', label, 'optional', 'A nickname shown inside MailBlaster.')),
     sec_('flame', 'Daily limit & warm-up', 'Protect a new sender’s reputation', field('Daily sending limit', limit, null, 'The most this account will ever send in one day.'),
       h('div', { style: 'margin-top:16px' }, toggle('Warm up this sender', wOn, x => { wOn = x; wBox.style.display = x ? '' : 'none'; }, 'Start low and increase the daily limit a little every day')), h('div', { style: 'margin-top:12px' }, wBox)),

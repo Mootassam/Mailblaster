@@ -27,6 +27,10 @@ PRESETS = {
     "mailgun":  {"host": "smtp.mailgun.org", "port": 587, "security": "starttls"},
     "ses":      {"host": "email-smtp.us-east-1.amazonaws.com", "port": 587, "security": "starttls"},
     "brevo":    {"host": "smtp-relay.brevo.com", "port": 587, "security": "starttls"},
+    "resend":   {"host": "smtp.resend.com", "port": 465, "security": "ssl", "username": "resend",
+                 "password_hint": "Resend API key (re_…)",
+                 "note": "Resend: username is \"resend\", password is your API key. Resend only sends mail — "
+                         "set Reply-to to a mailbox you can read and turn on Inbox sync for it to collect replies."},
     "custom":   {"host": "", "port": 587, "security": "starttls"},
 }
 
