@@ -46,7 +46,7 @@ except Exception:  # running from source without the helper
 if os.environ.get("MB_DB"):          # alternate database (testing / multiple workspaces)
     store.set_db_path(os.environ["MB_DB"])
 
-VERSION = "3.2.1"
+VERSION = "3.3.0"
 app = Flask(__name__, static_folder=_STATIC)
 app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024
 # store.init() + the background threads start in _boot(), after the single-instance check:
@@ -484,7 +484,8 @@ def api_group_delete(gid):
 
 @app.route("/api/recipients/count")
 def api_recipient_count():
-    return jsonify({"count": store.recipient_count(_ids("groups"), _ids("exclude"))})
+    return jsonify({"count": store.recipient_count(_ids("groups"), _ids("exclude"),
+                                                   request.args.get("verify_filter") or None)})
 
 
 # ------------------------------ contacts ------------------------------------ #
@@ -620,8 +621,12 @@ def api_unsub():
 # One pass at a time. Addresses are graded into deliverable / risky /
 # undeliverable / unknown (see verifier.py). Undeliverable ones are marked
 # invalid by store.set_contact_verify so campaigns skip them automatically.
+# The UI polls /api/verify/status for live progress: counts, speed, time left
+# and a feed of the latest results.
 VERIFY = {"status": "idle", "total": 0, "done": 0, "deliverable": 0, "risky": 0,
-          "undeliverable": 0, "unknown": 0, "scope": "", "deep": 0, "started": 0}
+          "undeliverable": 0, "unknown": 0, "scope": "", "deep": 0, "started": 0,
+          "finished": 0, "rate": 0, "eta": 0, "auto": 0, "seq": 0}
+_VFEED = collections.deque(maxlen=60)     # latest results, newest last
 _VLOCK = threading.Lock()
 _VSTOP = threading.Event()
 
@@ -644,16 +649,12 @@ def _dom_lock(dom_locks, lock, domain):
         return l
 
 
-def _run_verify(targets, deep, scope_label):
+def _run_verify(targets, deep):
     from concurrent.futures import ThreadPoolExecutor
     cache, clock, dom_locks = {}, threading.Lock(), {}
     mail_from = _verify_mail_from()
     helo = mail_from.split("@")[-1] if "@" in mail_from else "mail.local"
-    _VSTOP.clear()
-    with _VLOCK:
-        VERIFY.update(status="running", total=len(targets), done=0, deliverable=0,
-                      risky=0, undeliverable=0, unknown=0, scope=scope_label,
-                      deep=1 if deep else 0, started=time.time())
+    t0 = time.time()
 
     def work(item):
         cid, email = item
@@ -661,6 +662,7 @@ def _run_verify(targets, deep, scope_label):
             return
         domain = email.split("@")[-1] if "@" in email else email
         try:
+            # one probe per domain at a time: mail servers dislike parallel probes
             with _dom_lock(dom_locks, clock, domain):
                 res = verifier.verify_one(email, mail_from=mail_from, helo_name=helo,
                                           deep=deep, cache=cache)
@@ -674,23 +676,51 @@ def _run_verify(targets, deep, scope_label):
         with _VLOCK:
             VERIFY["done"] += 1
             VERIFY[res["result"]] = VERIFY.get(res["result"], 0) + 1
+            VERIFY["seq"] += 1
+            el = max(0.5, time.time() - t0)
+            VERIFY["rate"] = round(VERIFY["done"] / el * 60)
+            VERIFY["eta"] = round((VERIFY["total"] - VERIFY["done"]) / max(VERIFY["done"] / el, 0.01))
+            _VFEED.append({"seq": VERIFY["seq"], "id": cid, "email": email, "result": res["result"],
+                           "reason": res.get("reason", ""), "ts": time.time()})
 
     try:
-        workers = 10 if deep else 16
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        workers = 12 if deep else 16
+        with ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(work, targets))
     finally:
         with _VLOCK:
-            VERIFY["status"] = "stopped" if _VSTOP.is_set() else "done"
+            VERIFY.update(status="stopped" if _VSTOP.is_set() else "done", finished=time.time(), eta=0)
 
 
-def _start_verify(targets, deep, scope_label):
+def _start_verify(targets, deep, scope_label, auto=False):
+    """Start a pass unless one is running. Atomic: two clicks can't start two passes."""
     with _VLOCK:
         if VERIFY["status"] == "running":
             return False
-    threading.Thread(target=_run_verify, args=(targets, deep, scope_label),
-                     daemon=True).start()
+        _VSTOP.clear()
+        _VFEED.clear()
+        VERIFY.update(status="running", total=len(targets), done=0, deliverable=0, risky=0,
+                      undeliverable=0, unknown=0, scope=scope_label, deep=1 if deep else 0,
+                      started=time.time(), finished=0, rate=0, eta=0, auto=1 if auto else 0)
+    threading.Thread(target=_run_verify, args=(targets, deep), daemon=True).start()
     return True
+
+
+def _auto_verify_loop():
+    """Clean the list in real time: contacts that arrive (import, Lead Finder,
+    API) are verified in the background within about a minute."""
+    time.sleep(20)
+    while True:
+        try:
+            st = store.get_settings()
+            if st.get("auto_verify", "1") == "1":
+                targets = store.unverified_active_ids()
+                if targets:
+                    _start_verify(targets, st.get("auto_verify_deep", "1") == "1",
+                                  "new contacts", auto=True)
+        except Exception:
+            pass
+        time.sleep(45)
 
 
 @app.route("/api/verify/start", methods=["POST"])
@@ -702,8 +732,19 @@ def api_verify_start():
     only_unverified = _s("only_unverified", "0") == "1"
     targets = store.verify_targets(group_ids, exclude, only_unverified)
     if not targets:
-        return jsonify({"ok": False, "error": "No contacts to verify in this selection."}), 400
+        return jsonify({"ok": False, "error": "Nothing to check — every contact in this selection "
+                                              "is already verified." if only_unverified else
+                                              "No contacts to verify in this selection."}), 400
     label = "selected groups" if scope == "groups" and group_ids else "all contacts"
+    with _VLOCK:
+        auto_running = VERIFY["status"] == "running" and VERIFY.get("auto")
+    if auto_running:                 # a manual pass takes over from the background cleaner
+        _VSTOP.set()
+        for _ in range(100):
+            with _VLOCK:
+                if VERIFY["status"] != "running":
+                    break
+            time.sleep(0.1)
     if not _start_verify(targets, deep, label):
         return jsonify({"ok": False, "error": "A verification pass is already running."}), 400
     return jsonify({"ok": True, "total": len(targets), "deep": deep})
@@ -711,8 +752,11 @@ def api_verify_start():
 
 @app.route("/api/verify/status")
 def api_verify_status():
+    since = int(request.args.get("since", 0) or 0)
     with _VLOCK:
-        return jsonify(dict(VERIFY))
+        d = dict(VERIFY)
+        d["feed"] = [x for x in _VFEED if x["seq"] > since]
+    return jsonify(d)
 
 
 @app.route("/api/verify/stop", methods=["POST"])
@@ -728,6 +772,7 @@ def api_verify_precheck():
     exclude = _ids("exclude_group_ids") or None
     st = store.verify_stats(group_ids, exclude)
     st["recipients"] = store.recipient_count(group_ids, exclude)
+    st["by_filter"] = {k: store.recipient_count(group_ids, exclude, k) for k in store.VERIFY_FILTERS}
     with _VLOCK:
         st["running"] = VERIFY["status"] == "running"
     return jsonify(st)
@@ -1200,6 +1245,14 @@ class _Brakes:
             if fp >= self.fail_pct:
                 return (f"{fp:.0f}% of the last {w} sends failed (limit {self.fail_pct:g}%). "
                         "The provider may be throttling or blocking you.")
+        if self.n % 5 == 0 and self.n <= self.min_sample:
+            # early warning: the first sends are bouncing en masse — don't wait for the full sample
+            h = store.campaign_health(self.cid)
+            s = max(0, sent - self.base_sent)
+            hard = h["hard"] - self.base["hard"]
+            if hard >= 10 and hard >= 3 * max(s, 1):
+                return (f"{hard} of the first {s + hard} emails bounced — this list or your sender "
+                        "setup has a problem. Verify/clean the list, then resume.")
         if self.n % 10 == 0:
             h = store.campaign_health(self.cid)
             s = max(0, sent - self.base_sent)
@@ -1419,7 +1472,7 @@ def _campaign_recipients(camp):
     if camp.get("parent_id"):
         return _followup_recipients(camp)
     g, ex = store.campaign_groups(camp)
-    return store.recipients_for(g, exclude_group_ids=ex)
+    return store.recipients_for(g, exclude_group_ids=ex, vfilter=camp.get("verify_filter") or "all")
 
 
 @app.route("/api/campaign/send", methods=["POST"])
@@ -1434,9 +1487,14 @@ def api_campaign_send():
         group_ids = [int(_s("list_id"))]
     exclude = _ids("exclude_group_ids")
     account_ids = _ids("account_ids")
-    recipients = store.recipients_for(group_ids, exclude_group_ids=exclude)
+    vfilter = _s("verify_filter", "all")
+    if vfilter not in store.VERIFY_FILTERS:
+        vfilter = "all"
+    recipients = store.recipients_for(group_ids, exclude_group_ids=exclude, vfilter=vfilter)
     if not recipients:
-        return jsonify({"ok": False, "error": "No active contacts match these groups."}), 400
+        return jsonify({"ok": False, "error": "No active contacts match these groups." if vfilter == "all" else
+                        "None of these contacts are verified as good yet — clean the list first, "
+                        "or choose to send to everyone."}), 400
 
     scheduled_at = 0.0
     if _s("scheduled_at"):
@@ -1452,7 +1510,7 @@ def api_campaign_send():
           "track_clicks": 1 if _s("track_clicks", "1") == "1" else 0,
           "rate": int(float(_s("rate_per_min", "60") or 60)),
           "jitter": float(_s("jitter", "0") or 0), "brakes": 0 if _s("brakes", "1") == "0" else 1,
-          "scheduled_at": scheduled_at,
+          "scheduled_at": scheduled_at, "verify_filter": vfilter,
           "status": "scheduled" if scheduled_at > time.time() else "draft"}
     cid = store.create_campaign(cd)
 
@@ -1472,7 +1530,7 @@ def api_campaign_send():
             "group_ids": group_ids, "exclude_group_ids": exclude,
             "account_ids": account_ids, "track_opens": cd["track_opens"],
             "track_clicks": cd["track_clicks"], "rate": cd["rate"], "jitter": cd["jitter"],
-            "brakes": cd["brakes"], "parent_id": cid, "step_no": i,
+            "brakes": cd["brakes"], "parent_id": cid, "step_no": i, "verify_filter": vfilter,
             "send_to": fu.get("send_to") or "non_openers",
             "scheduled_at": start + delay_h * 3600, "status": "scheduled"})
 
@@ -1520,6 +1578,7 @@ def api_campaign_resume_run(cid):
     if not recips:
         store.set_campaign_status(cid, "done")
         return jsonify({"ok": True, "nothing": True})
+    store.clear_failed_sends(cid, [r["id"] for r in recips])
     _start_job(cid, camp, recips, resume=True)
     return jsonify({"ok": True, "remaining": len(recips)})
 
@@ -1698,6 +1757,7 @@ def _boot():
     _BOOTED = True
     store.init()
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+    threading.Thread(target=_auto_verify_loop, daemon=True).start()
     threading.Thread(target=_imap_loop, daemon=True).start()
 
 

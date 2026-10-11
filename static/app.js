@@ -249,13 +249,19 @@ function renderNav() {
     if (n.id === 'senders' && paused) badge = h('span', { class: 'cnt', style: 'background:#f59e0b', title: paused + ' sender(s) auto-paused' }, '!');
     return h('button', { class: 'nav-btn' + (APP.view === n.id ? ' on' : ''), type: 'button', onclick: () => go(n.id) }, icon(n.ic, 18), n.label, badge);
   }));
-  renderSyncLine();
+  renderSyncLine(); renderCleanLine();
 }
 function renderSyncLine() {
   const im = APP.state.imap || {}, on = (APP.state.accounts || []).some(a => a.imap_enabled);
   const el = $('#syncLine'); if (!el) return;
   if (!on) { el.replaceChildren(h('span', { class: 'dot' }), 'Inbox sync off'); return; }
   el.replaceChildren(h('span', { class: 'dot ' + (im.running ? 'spin' : 'g') }), im.running ? 'Syncing inbox…' : ('Inbox synced ' + (im.last_run ? timeAgo(im.last_run) : '—')));
+}
+function renderCleanLine() {
+  const el = $('#cleanLine'); if (!el) return; const v = APP.verify || {};
+  if (v.status !== 'running') { el.replaceChildren(); el.onclick = null; return; }
+  el.onclick = () => verifyModal();
+  el.replaceChildren(h('span', { class: 'dot spin' }), `Cleaning list… ${fmt(v.done || 0)} / ${fmt(v.total || 0)}`);
 }
 function toggleSide(v) { $('#side').classList.toggle('open', v); $('#backdrop').classList.toggle('show', v); }
 async function loadState() { const s = await GET('/api/state'); if (s && s.contacts) { APP.state = s; APP.prevJobs = snapshotJobs(s.jobs); } renderNav(); }
@@ -272,7 +278,7 @@ function route() {
 }
 window.addEventListener('hashchange', route);
 async function render() {
-  closeMenu(); APP.live = null;
+  closeMenu(); APP.live = null; APP.onVerify = null;
   const [t, s] = TITLES[APP.view] || ['', '']; $('#ttl').textContent = t; $('#tsub').textContent = s;
   $('#topright').replaceChildren(); renderNav();
   const fn = { dashboard: viewDashboard, campaigns: viewCampaigns, inbox: viewInbox, contacts: viewContacts, templates: viewTemplates,
@@ -298,6 +304,18 @@ async function poll() {
       APP.prevJobs = now;
       if (finished) { await loadState(); if (!MODAL_STACK.length && ['dashboard', 'campaigns'].includes(APP.view)) render(); }
       else { renderNav(); if (APP.live && !MODAL_STACK.length) APP.live(); }
+    }
+  }
+  if ((APP.verify && APP.verify.status === 'running') || APP.tick % 5 === 0) {
+    const v = await GET('/api/verify/status?since=999999999');
+    if (v && v.status) {
+      const was = APP.verify && APP.verify.status;
+      APP.verify = v; renderCleanLine();
+      if (APP.onVerify && !MODAL_STACK.length && (v.status === 'running' ? APP.tick % 3 === 0 : was === 'running')) APP.onVerify();
+      if (was === 'running' && v.status !== 'running') {
+        if (v.auto && v.done) toast(`List cleaned: ${fmt(v.deliverable || 0)} good, ${fmt(v.risky || 0)} risky, ${fmt(v.undeliverable || 0)} removed.`, 'info');
+        if (!MODAL_STACK.length && ['contacts', 'dashboard'].includes(APP.view)) { await loadState(); render(); }
+      }
     }
   }
   if (APP.tick % 10 === 0) {
@@ -508,7 +526,7 @@ async function resumeRun(cid) {
 /* ---------------- builder ---------------- */
 function CBdefault() {
   return { step: 1, name: '', group_ids: [], exclude_group_ids: [], showExclude: false, subject: '', subject_b: '', ab: false, html: '', text: '',
-    account_ids: [], rate: '30', jitter: '3', track_opens: true, track_clicks: true, brakes: true, schedule: '', testTo: '', followups: [], device: 'desktop', count: null };
+    account_ids: [], rate: '30', jitter: '3', track_opens: true, track_clicks: true, brakes: true, schedule: '', testTo: '', followups: [], device: 'desktop', count: null, verify_filter: 'safe_risky' };
 }
 let CB = CBdefault();
 function newCampaign(preset) { CB = Object.assign(CBdefault(), preset || {}); go('campaigns', 'new'); }
@@ -517,7 +535,7 @@ async function duplicateCampaign(id) {
   newCampaign({ name: c.name + ' (copy)', subject: c.subject, subject_b: c.subject_b || '', ab: !!c.subject_b, html: c.html, text: c.text || '',
     group_ids: c.group_ids || [], exclude_group_ids: c.exclude_group_ids || [], showExclude: (c.exclude_group_ids || []).length > 0,
     account_ids: (c.account_ids || []).map(String), rate: String(c.rate || 30), jitter: String(c.jitter || 3), track_opens: !!c.track_opens, track_clicks: !!c.track_clicks,
-    brakes: c.brakes !== 0, followups: c.followups || [] });
+    brakes: c.brakes !== 0, followups: c.followups || [], verify_filter: c.verify_filter || 'all' });
 }
 function campaignBuilder() {
   setTop(btn('Cancel', { onclick: async () => { if (!CB.subject && !CB.html || await confirmBox({ title: 'Discard this campaign?', text: 'Your unsent changes will be lost.', ok: 'Discard', danger: true })) go('campaigns'); } }));
@@ -536,7 +554,7 @@ function renderStep() {
   [stepAudience, stepContent, stepSend][CB.step - 1](box);
 }
 const refreshCount = debounce(async (el) => {
-  const q = `groups=${CB.group_ids.join(',')}&exclude=${CB.exclude_group_ids.join(',')}`;
+  const q = `groups=${CB.group_ids.join(',')}&exclude=${CB.exclude_group_ids.join(',')}&verify_filter=${CB.step === 3 ? (CB.verify_filter || 'all') : 'all'}`;
   const r = await GET('/api/recipients/count?' + q); CB.count = r.count || 0; if (el) el.textContent = fmt(CB.count);
 }, 200);
 function stepAudience(box) {
@@ -700,14 +718,25 @@ function stepSend(box) {
   const refreshPrecheck = async () => {
     const q = `group_ids=${CB.group_ids.join(',')}&exclude_group_ids=${CB.exclude_group_ids.join(',')}`;
     const s = await GET('/api/verify/precheck?' + q) || {};
-    const total = s.recipients || 0, unv = s.unverified || 0;
-    vcBody.replaceChildren(
+    const total = s.recipients || 0, unv = s.unverified || 0, bf = s.by_filter || {};
+    const VF = [['safe_risky', 'Cleaned emails only', 'Good + risky (catch-all / role inboxes like info@). Skips everything not checked yet.'],
+      ['safe', 'Only confirmed good', 'Safest: only addresses the mail server confirmed.'],
+      ['all', 'Everyone', 'Includes addresses not checked yet — not recommended for cold email.']];
+    const vfBox = h('div', { class: 'vstack', style: 'gap:8px;margin:2px 0 14px' },
+      h('div', { class: 'b small' }, 'Send to'),
+      VF.map(([k, l, d]) => h('label', { class: 'pick' + (CB.verify_filter === k ? ' on' : ''), style: 'display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px' },
+        h('input', { type: 'radio', name: 'vfilter', checked: CB.verify_filter === k, style: 'margin-top:3px', onchange: () => {
+          CB.verify_filter = k; CB.count = bf[k] || 0; const rc = $('#send-rcpt'); if (rc) rc.textContent = fmt(CB.count); etaUpd(); renderCap(); refreshPrecheck(); } }),
+        h('div', { style: 'flex:1' }, h('div', { class: 'b small' }, l, h('span', { class: 'muted', style: 'font-weight:500' }, ` · ${fmt(bf[k] || 0)} recipients`)), h('div', { class: 'xs muted' }, d)))));
+    CB.count = bf[CB.verify_filter || 'all'] != null ? bf[CB.verify_filter || 'all'] : CB.count;
+    const rc0 = $('#send-rcpt'); if (rc0) rc0.textContent = fmt(CB.count || 0); etaUpd(); renderCap();
+    vcBody.replaceChildren(vfBox,
       h('div', { class: 'hstack', style: 'gap:8px;flex-wrap:wrap;margin-bottom:12px' },
         s.deliverable ? pill(fmt(s.deliverable) + ' good', 'g') : null,
         s.risky ? pill(fmt(s.risky) + ' risky', 'a') : null,
         unv ? pill(fmt(unv) + ' not checked', '') : null,
         s.undeliverable ? pill(fmt(s.undeliverable) + ' removed', 'r') : null),
-      unv ? banner('warn', `${fmt(unv)} of ${fmt(total)} recipients haven’t been verified. Verify now to drop dead addresses before they bounce.`)
+      unv ? banner('warn', `${fmt(unv)} of ${fmt(total)} recipients haven’t been verified yet${CB.verify_filter !== 'all' ? ' — they won’t get this campaign until they are' : ''}. Verify now (it also runs automatically in the background).`)
         : (total ? banner('ok', 'All recipients are verified — good to send.') : h('div', { class: 'small muted' }, 'No recipients selected yet.')),
       h('div', { style: 'margin-top:12px' }, btn('Verify recipients', {
         icon: 'mailcheck', onclick: () => verifyModal({
@@ -716,7 +745,7 @@ function stepSend(box) {
         })
       })));
   };
-  refreshPrecheck();
+  refreshPrecheck(); APP.onVerify = () => { if (CB.step === 3 && APP.view === 'campaigns') refreshPrecheck(); };
   box.append(h('div', { class: 'split' },
     h('div', {},
       card('Senders', 'Pick the accounts that send this campaign. Volume rotates between them and every daily limit / warm-up step is respected.', null, h('div', { class: 'card-b' }, accBox, h('div', { style: 'margin-top:12px' }, capEl))),
@@ -746,7 +775,7 @@ async function doSend() {
     text: when ? `“${CB.name || 'Campaign'}” will start ${when.toLocaleString()} to ${fmt(n)} recipients.` : `“${CB.name || 'Campaign'}” will start sending to ${fmt(n)} recipients now.` + (CB.followups.length ? ` ${CB.followups.length} follow-up step(s) will be scheduled.` : '') });
   if (!ok) return;
   const r = await POST('/api/campaign/send', { name: CB.name || 'Campaign', subject: CB.subject, subject_b: CB.ab ? CB.subject_b : '', html: CB.html, text: CB.text,
-    group_ids: CB.group_ids, exclude_group_ids: CB.exclude_group_ids, account_ids: CB.account_ids, rate_per_min: CB.rate || 30, jitter: CB.jitter || 0,
+    group_ids: CB.group_ids, exclude_group_ids: CB.exclude_group_ids, account_ids: CB.account_ids, rate_per_min: CB.rate || 30, jitter: CB.jitter || 0, verify_filter: CB.verify_filter || 'all',
     track_opens: CB.track_opens ? 1 : 0, track_clicks: CB.track_clicks ? 1 : 0, brakes: CB.brakes ? 1 : 0,
     followups: CB.followups.length ? JSON.stringify(CB.followups) : '', scheduled_at: when ? Math.floor(when.getTime() / 1000) : '' });
   if (!r.ok) return toast(r.error, 'err', 8000);
@@ -1033,7 +1062,8 @@ function renderContactMain(main) {
   const g = (APP.state.groups || []).find(x => String(x.id) === String(CQ.group));
   const search = h('input', { placeholder: 'Search email or name…', value: CQ.q, oninput: debounce(e => { CQ.q = e.target.value; CQ.page = 0; clearSel(); loadContacts(); }, 300) });
   const status = h('select', { style: 'width:auto', onchange: e => { CQ.status = e.target.value; CQ.page = 0; clearSel(); loadContacts(); } },
-    [['', 'Any status'], ['active', 'Active'], ['replied', 'Replied'], ['unsubscribed', 'Unsubscribed'], ['bounced', 'Bounced'], ['invalid', 'Invalid']].map(([v, l]) => h('option', { value: v, selected: CQ.status === v }, l)));
+    [['', 'Any status'], ['active', 'Active'], ['replied', 'Replied'], ['unsubscribed', 'Unsubscribed'], ['bounced', 'Bounced'], ['invalid', 'Invalid'],
+      ['v:deliverable', 'Cleaning: good'], ['v:risky', 'Cleaning: risky'], ['v:undeliverable', 'Cleaning: removed'], ['v:unknown', 'Cleaning: unknown'], ['v:unchecked', 'Cleaning: not checked yet']].map(([v, l]) => h('option', { value: v, selected: CQ.status === v }, l)));
   const more = iconBtn('dots', 'More', e => openMenu(e.currentTarget, [
     { label: 'Export these contacts (CSV)', icon: 'download', onclick: () => location.href = `/api/export/contacts.csv?q=${encodeURIComponent(CQ.q)}&status=${CQ.status}&group=${CQ.group}` },
     { label: 'Verify email addresses', icon: 'mailcheck', onclick: () => verifyModal() },
@@ -1080,7 +1110,7 @@ function renderContactTable() {
         h('td', { class: 'w-cb' }, cb),
         h('td', {}, h('div', { class: 'hstack', style: 'flex-wrap:nowrap' }, avatar(nm, r.email, 30), h('div', { style: 'min-width:0' }, h('div', { class: 'b small ellipsis' }, nm || r.email), nm ? h('div', { class: 'xs muted ellipsis' }, r.email) : null))),
         h('td', {}, h('div', { class: 'hstack', style: 'gap:4px' }, (r.groups || []).slice(0, 3).map(chip), (r.groups || []).length > 3 ? h('span', { class: 'xs muted' }, '+' + (r.groups.length - 3)) : null, !(r.groups || []).length ? h('span', { class: 'xs dim' }, '—') : null)),
-        h('td', {}, statusPillC(r.status), r.replied_at ? h('span', { style: 'margin-left:4px' }, pill('Replied', 's')) : null),
+        h('td', {}, statusPillC(r.status), r.replied_at ? h('span', { style: 'margin-left:4px' }, pill('Replied', 's')) : null, r.verify_status ? h('span', { style: 'margin-left:4px' }, verifyPill(r)) : null),
         h('td', { class: 'xs muted nowrap' }, new Date(r.created_at * 1000).toLocaleDateString()),
         h('td', { style: 'width:40px;text-align:right' }, iconBtn('trash', 'Delete contact', async () => {
           if (!await confirmBox({ title: 'Delete contact?', text: r.email + ' will be removed permanently from MailBlaster and all groups. If they unsubscribed or bounced they stay blocked.', ok: 'Delete', danger: true })) return;
@@ -1220,51 +1250,87 @@ const VERIFY_BUCKETS = [
   ['unknown', 'Unknown', '#64748b', '#eef1f6'],
 ];
 function verifyModal(scope) {
-  // scope (optional): { group_ids, exclude_group_ids, label } — verify just a
+  // scope (optional): { group_ids, exclude_group_ids, label, count, onDone } — verify just a
   // campaign's recipients. No scope = verify every active contact.
+  // Live: tiles, speed, time left and a feed of each result as it happens. If a pass is
+  // already running (e.g. the automatic background cleaner) the window attaches to it.
   const scoped = !!(scope && scope.group_ids && scope.group_ids.length);
   const bar = h('div', { class: 'pbar lg' }, h('div', { style: 'width:0' }));
   const info = h('div', { class: 'small muted', style: 'margin-top:10px' },
     scoped ? `Checking the ${fmt(scope.count || 0)} recipients of ${scope.label || 'this campaign'}.`
       : 'Checks every active contact. Undeliverable addresses are marked invalid so your campaigns skip them automatically.');
+  const stat = h('div', { class: 'xs muted', style: 'margin-top:6px;min-height:16px' });
   const tiles = h('div', { class: 'grid g4', style: 'margin:14px 0 2px' }, VERIFY_BUCKETS.map(([k, l, c, bg]) =>
-    h('div', { class: 'ktile', id: 'vb-' + k, style: `--kc:${c};--kb:${bg}` },
-      h('div', { class: 'kv', id: 'vn-' + k }, '0'), h('div', { class: 'kl' }, l))));
-  const setTiles = s => VERIFY_BUCKETS.forEach(([k]) => { const e = $('#vn-' + k); if (e) e.textContent = fmt(s[k] || 0); });
+    h('div', { class: 'ktile', style: `--kc:${c};--kb:${bg}` },
+      h('div', { class: 'kv', 'data-k': k }, '0'), h('div', { class: 'kl' }, l))));
+  const setTiles = v => tiles.querySelectorAll('[data-k]').forEach(e => { e.textContent = fmt(v[e.dataset.k] || 0); });
+  const PILL = { deliverable: ['Good', 'g'], risky: ['Risky', 'a'], undeliverable: ['Removed', 'r'], unknown: ['Unknown', 'm'] };
+  const feed = h('div', { style: 'margin-top:14px;max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:10px;display:none' });
+  const addFeed = items => {
+    if (!items || !items.length) return; feed.style.display = '';
+    items.forEach(x => {
+      const [t, c] = PILL[x.result] || ['?', 'm'];
+      feed.prepend(h('div', { style: 'display:flex;align-items:center;gap:10px;padding:7px 12px;border-bottom:1px solid var(--line);font-size:13px' },
+        pill(t, c), h('span', { style: 'font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, x.email),
+        h('span', { class: 'xs muted', style: 'margin-left:auto;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:45%' }, x.reason || '')));
+    });
+    while (feed.children.length > 80) feed.lastChild.remove();
+  };
 
-  let deep = true, onlyNew = true;
+  let deep = true, onlyNew = true, seq = 0, alive = true, watching = false;
   const deepTog = toggle('Deep check (ask each mail server if the mailbox exists)', deep, v => deep = v,
     'Most accurate. A little slower, and some networks block it — then it safely falls back to domain checks.');
   const newTog = toggle('Only check addresses not verified yet', onlyNew, v => onlyNew = v);
+  const opts = h('div', { class: 'vstack', style: 'margin-top:16px;gap:12px' }, deepTog, newTog);
 
-  const stopBtn = btn('Stop', { kind: 'quiet', icon: 'x', onclick: async () => { await POST('/api/verify/stop'); } });
+  const stopBtn = btn('Stop', { kind: 'quiet', icon: 'x', onclick: async () => { stopBtn.disabled = true; await POST('/api/verify/stop'); } });
   stopBtn.style.display = 'none';
+  const running = on => { start.disabled = on; stopBtn.style.display = on ? '' : 'none'; stopBtn.disabled = false; opts.style.opacity = on ? .5 : 1; opts.style.pointerEvents = on ? 'none' : ''; };
+
+  const watch = async () => {
+    if (watching) return; watching = true;
+    while (alive) {
+      const v = await GET('/api/verify/status?since=' + seq);
+      if (!v || !v.status) { await new Promise(r => setTimeout(r, 1500)); continue; }
+      APP.verify = v; renderCleanLine();
+      if (v.feed && v.feed.length) { seq = v.feed[v.feed.length - 1].seq; addFeed(v.feed); }
+      const p = v.total ? v.done / v.total * 100 : 0;
+      bar.firstChild.style.width = p + '%'; setTiles(v);
+      if (v.status === 'running') {
+        running(true);
+        info.textContent = `${v.auto ? 'Auto-cleaning new contacts' : 'Checking ' + (v.scope || 'contacts')} — ${fmt(v.done)} of ${fmt(v.total)}${v.deep ? ' · deep check' : ''}`;
+        stat.textContent = v.done ? `${fmt(v.rate || 0)} / min · about ${dur(v.eta)} left` : 'Starting…';
+        await new Promise(r => setTimeout(r, 600));
+        continue;
+      }
+      running(false);
+      if (v.started) {
+        bar.firstChild.style.width = '100%';
+        info.textContent = (v.status === 'stopped' ? 'Stopped. ' : 'Done. ') +
+          `${fmt(v.undeliverable || 0)} undeliverable removed from sending, ${fmt(v.risky || 0)} risky, ${fmt(v.deliverable || 0)} good, ${fmt(v.unknown || 0)} unknown.`;
+        stat.textContent = v.finished && v.started ? `Took ${dur(v.finished - v.started)}.` : '';
+        await loadState(); if (APP.view === 'contacts') viewContacts();
+        if (scope && scope.onDone) scope.onDone(v);
+      }
+      break;
+    }
+    watching = false;
+  };
+
   const start = btn('Start verification', { kind: 'primary', icon: 'mailcheck', onclick: async () => {
-    start.disabled = true; stopBtn.style.display = ''; info.textContent = 'Starting…';
+    running(true); info.textContent = 'Starting…'; feed.replaceChildren(); seq = 0;
     const body = { deep: deep ? 1 : 0, only_unverified: onlyNew ? 1 : 0 };
     if (scoped) { body.scope = 'groups'; body.group_ids = scope.group_ids; body.exclude_group_ids = scope.exclude_group_ids || []; }
     else body.scope = 'all';
     const r = await POST('/api/verify/start', body);
-    if (!r.ok) { start.disabled = false; stopBtn.style.display = 'none'; return toast(r.error || 'Could not start.', 'warn'); }
-    const poll_ = async () => {
-      const s = await GET('/api/verify/status'); const p = s.total ? s.done / s.total * 100 : 0;
-      bar.firstChild.style.width = p + '%'; setTiles(s);
-      info.textContent = `Checked ${fmt(s.done)} of ${fmt(s.total)}${s.deep ? ' · deep check' : ''}…`;
-      if (s.status === 'running') setTimeout(poll_, 700);
-      else {
-        bar.firstChild.style.width = '100%'; setTiles(s); start.disabled = false; stopBtn.style.display = 'none';
-        info.textContent = (s.status === 'stopped' ? 'Stopped. ' : 'Done. ') +
-          `${fmt(s.undeliverable || 0)} undeliverable removed from sending, ${fmt(s.risky || 0)} risky, ${fmt(s.deliverable || 0)} good.`;
-        await loadState(); if (APP.view === 'contacts') viewContacts();
-        if (scope && scope.onDone) scope.onDone(s);
-      }
-    };
-    poll_();
+    if (!r.ok) { running(false); info.textContent = ''; return toast(r.error || 'Could not start.', 'warn'); }
+    watch();
   } });
-  const m = modal({ title: scoped ? 'Verify recipients' : 'Verify email addresses', icon: 'mailcheck', wide: true,
-    body: h('div', {}, info, tiles, bar, h('div', { class: 'vstack', style: 'margin-top:16px;gap:12px' }, deepTog, newTog),
-      h('div', { class: 'xs muted', style: 'margin-top:12px' }, 'Deliverable = safe to send · Risky = sendable but lower confidence (catch-all / role inbox) · Undeliverable = will bounce · Unknown = couldn’t tell.')),
+  const m = modal({ title: scoped ? 'Verify recipients' : 'Clean the list', icon: 'mailcheck', wide: true, onClose: () => { alive = false; },
+    body: h('div', {}, info, stat, tiles, bar, feed, opts,
+      h('div', { class: 'xs muted', style: 'margin-top:12px' }, 'Deliverable = safe to send · Risky = sendable but lower confidence (catch-all / role inbox) · Undeliverable = will bounce, removed from sending · Unknown = couldn’t tell. New contacts are cleaned automatically in the background (Settings).')),
     footer: [btn('Close', { onclick: () => m.close() }), stopBtn, start] });
+  GET('/api/verify/status').then(v => { if (v && v.status === 'running') { info.textContent = 'A cleaning pass is running…'; watch(); } });
   return m;
 }
 
@@ -1444,6 +1510,13 @@ async function viewDeliverability() {
     h('div', { class: 'vstack', style: 'margin-top:16px;gap:14px' }, toggle('Stop follow-ups when someone replies', stopFu, x => stopFu = x, 'Nobody gets a “just following up” after they answered'),
       toggle('Auto-unsubscribe “remove me” replies', autoUnsub, x => autoUnsub = x, 'Replies asking to be removed are honored automatically')),
     h('div', { class: 'hstack', style: 'margin-top:16px' }, btn('Save', { kind: 'primary', icon: 'check', onclick: () => saveSettings(procCard, { stop_followups_on_reply: stopFu ? 1 : 0, auto_unsub_on_request: autoUnsub ? 1 : 0 }) }))));
+  let autoV = st.auto_verify !== '0', autoDeep = st.auto_verify_deep !== '0';
+  const cleanCard = card('List cleaning', 'Keep the list clean in real time', btn('Clean now', { size: 'sm', icon: 'mailcheck', onclick: () => verifyModal() }), h('div', { class: 'card-b' },
+    h('div', { class: 'vstack', style: 'gap:14px' },
+      toggle('Automatically clean new contacts', autoV, x => autoV = x, 'Every contact you import or receive from Lead Finder is verified in the background within about a minute'),
+      toggle('Use the deep check', autoDeep, x => autoDeep = x, 'Asks each mail server whether the mailbox exists (falls back to domain checks if your network blocks it)')),
+    h('div', { class: 'help', style: 'margin-top:12px' }, 'In each campaign, choose “Send to: Cleaned emails only” so nobody unchecked or undeliverable is emailed.'),
+    h('div', { class: 'hstack', style: 'margin-top:16px' }, btn('Save', { kind: 'primary', icon: 'check', onclick: () => saveSettings(cleanCard, { auto_verify: autoV ? 1 : 0, auto_verify_deep: autoDeep ? 1 : 0 }) }))));
   // warm-up overview
   const accs = d.accounts || [];
   const wu = card('Sender warm-up', 'Today’s effective limit for each sender', btn('Manage senders', { size: 'sm', onclick: () => go('senders') }), accs.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 't' },
@@ -1499,7 +1572,7 @@ async function viewDeliverability() {
   // domain check
   const dom = h('input', { placeholder: 'yourdomain.com', value: ((accs[0] || {}).from_email || '').split('@')[1] || '' }); const dres = h('div', { style: 'margin-top:14px' });
   const domCard = card('Domain health check', 'Inboxes trust you more when these DNS records exist', null, h('div', { class: 'card-b' }, h('div', { class: 'hstack' }, h('div', { style: 'flex:1;max-width:340px' }, dom), btn('Check domain', { icon: 'globe', onclick: () => domainCheck(dom.value, dres) })), dres));
-  v.replaceChildren(kp, h('div', { class: 'grid g2', style: 'align-items:start' }, brakesCard, procCard), wu, tabCard, domCard);
+  v.replaceChildren(kp, h('div', { class: 'grid g2', style: 'align-items:start' }, brakesCard, procCard), h('div', { class: 'grid g2', style: 'align-items:start' }, cleanCard), wu, tabCard, domCard);
 }
 async function domainCheck(domain, box) {
   if (!domain) return toast('Enter a domain.', 'warn'); box.replaceChildren(h('div', { class: 'muted small' }, 'Looking up DNS…'));

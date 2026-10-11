@@ -30,6 +30,15 @@ DEFAULT_SETTINGS = {
     # bounce / reply processing
     "imap_interval_min": "5", "soft_bounce_limit": "3",
     "stop_followups_on_reply": "1", "auto_unsub_on_request": "1",
+    # list cleaning: verify new contacts automatically in the background
+    "auto_verify": "1", "auto_verify_deep": "1",
+}
+
+# Which verification results a campaign may send to ("Send only to cleaned emails").
+VERIFY_FILTERS = {
+    "all": None,                                   # everyone active (undeliverable are already invalid)
+    "safe": ("deliverable",),                      # only confirmed-good addresses
+    "safe_risky": ("deliverable", "risky"),        # good + sendable-but-unconfirmed (catch-all / role)
 }
 
 
@@ -129,7 +138,8 @@ def init():
                                    ("brakes", "INTEGER DEFAULT 1"),
                                    ("brake_reason", "TEXT DEFAULT ''"),
                                    ("bounced", "INTEGER DEFAULT 0"),
-                                   ("tracking", "TEXT DEFAULT ''")])
+                                   ("tracking", "TEXT DEFAULT ''"),
+                                   ("verify_filter", "TEXT DEFAULT 'all'")])
         _add_cols(c, "sends", [("message_id", "TEXT DEFAULT ''"),
                                ("account_id", "INTEGER DEFAULT 0")])
         c.executescript("""
@@ -149,6 +159,9 @@ def init():
         """)
         # a campaign can't be "running" at startup: the process that ran it is gone
         c.execute("UPDATE campaigns SET status='interrupted' WHERE status='running'")
+        # results of the 3.2.0 deep-check crash were never real checks: re-check them
+        c.execute("UPDATE contacts SET verify_status='', verify_reason='', verify_score=0 "
+                  "WHERE verify_status='unknown' AND verify_reason LIKE 'checker error:%'")
 
 
 # --------------------------- settings --------------------------------------- #
@@ -556,6 +569,11 @@ def _contact_where(q="", status="", group=""):
     where, args = ["1=1"], []
     if status == "replied":
         where.append("c.replied_at>0")
+    elif status == "v:unchecked":
+        where.append("c.status='active' AND c.verify_status=''")
+    elif status in ("v:deliverable", "v:risky", "v:undeliverable", "v:unknown"):
+        where.append("c.verify_status=?")
+        args.append(status[2:])
     elif status:
         where.append("c.status=?")
         args.append(status)
@@ -578,7 +596,8 @@ def search_contacts(q="", status="", page=0, per=50, group=""):
         total = c.execute(f"SELECT COUNT(*) FROM contacts c WHERE {w}", args).fetchone()[0]
         rows = [dict(r) for r in c.execute(
             f"SELECT c.id,c.email,c.first_name,c.last_name,c.status,c.status_reason,c.replied_at,"
-            f"c.created_at FROM contacts c WHERE {w} ORDER BY c.created_at DESC, c.id DESC "
+            f"c.created_at,c.verify_status,c.verify_reason FROM contacts c WHERE {w} "
+            "ORDER BY c.created_at DESC, c.id DESC "
             "LIMIT ? OFFSET ?", args + [per, page * per])]
         if rows:
             ids = [r["id"] for r in rows]
@@ -686,8 +705,12 @@ def bulk_contacts(action, ids=None, filt=None, group_id=None):
         return n
 
 
-def _recipient_sql(group_ids=None, exclude_ids=None):
+def _recipient_sql(group_ids=None, exclude_ids=None, vfilter=None):
     where, args = ["c.status='active'"], []
+    allowed = VERIFY_FILTERS.get(vfilter or "all")
+    if allowed:
+        where.append(f"c.verify_status IN ({','.join('?' * len(allowed))})")
+        args += list(allowed)
     if group_ids:
         where.append(f"c.id IN (SELECT contact_id FROM list_members WHERE list_id IN "
                      f"({','.join('?' * len(group_ids))}))")
@@ -699,18 +722,19 @@ def _recipient_sql(group_ids=None, exclude_ids=None):
     return " AND ".join(where), args
 
 
-def recipient_count(group_ids=None, exclude_ids=None):
-    w, args = _recipient_sql(group_ids, exclude_ids)
+def recipient_count(group_ids=None, exclude_ids=None, vfilter=None):
+    w, args = _recipient_sql(group_ids, exclude_ids, vfilter)
     with _LOCK, _conn() as c:
         return c.execute(f"SELECT COUNT(*) FROM contacts c WHERE {w}", args).fetchone()[0]
 
 
-def recipients_for(group_ids=None, only=None, exclude_ids=None, exclude_group_ids=None):
+def recipients_for(group_ids=None, only=None, exclude_ids=None, exclude_group_ids=None, vfilter=None):
     """Active recipients of the chosen groups (none = everyone), minus excluded groups.
-    only: allowed contact ids (follow-ups); exclude_ids: contact ids to skip."""
+    only: allowed contact ids (follow-ups); exclude_ids: contact ids to skip;
+    vfilter: a VERIFY_FILTERS key ("send only to cleaned emails")."""
     if isinstance(group_ids, int):
         group_ids = [group_ids]
-    w, args = _recipient_sql(group_ids, exclude_group_ids)
+    w, args = _recipient_sql(group_ids, exclude_group_ids, vfilter)
     with _LOCK, _conn() as c:
         rows = c.execute(f"SELECT c.* FROM contacts c WHERE {w} ORDER BY c.id", args).fetchall()
     out = []
@@ -1129,8 +1153,8 @@ def create_campaign(d):
         return c.execute(
             "INSERT INTO campaigns(name,subject,subject_b,html,text,list_id,account_ids,"
             "track_opens,track_clicks,rate,jitter,parent_id,step_no,send_to,scheduled_at,"
-            "status,created_at,group_ids,exclude_group_ids,brakes) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "status,created_at,group_ids,exclude_group_ids,brakes,verify_filter) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (d.get("name", "Campaign"), d.get("subject", ""), d.get("subject_b", ""),
              d.get("html", ""), d.get("text", ""), d.get("list_id") or None,
              json.dumps(d.get("account_ids") or []), int(d.get("track_opens", 1)),
@@ -1138,7 +1162,8 @@ def create_campaign(d):
              int(d.get("parent_id", 0)), int(d.get("step_no", 0)), d.get("send_to", "all"),
              float(d.get("scheduled_at") or 0), d.get("status", "draft"), time.time(),
              json.dumps(d.get("group_ids") or []), json.dumps(d.get("exclude_group_ids") or []),
-             int(d.get("brakes", 1)))).lastrowid
+             int(d.get("brakes", 1)),
+             d.get("verify_filter") if d.get("verify_filter") in VERIFY_FILTERS else "all")).lastrowid
 
 
 def campaign_groups(camp):
@@ -1238,6 +1263,25 @@ def send_counts(cid):
         by = {r[0]: r[1] for r in c.execute(
             "SELECT status,COUNT(*) FROM sends WHERE campaign_id=? GROUP BY status", (cid,))}
     return by
+
+
+def clear_failed_sends(cid, contact_ids):
+    """Before retrying people whose send failed (sender-side), drop the old 'failed'
+    rows so the report doesn't count them twice."""
+    ids = list(contact_ids)
+    with _LOCK, _conn() as c:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            c.execute(f"DELETE FROM sends WHERE campaign_id=? AND status='failed' AND contact_id IN "
+                      f"({','.join('?' * len(chunk))})", [cid] + chunk)
+
+
+def unverified_active_ids(limit=2000):
+    """Active contacts never checked — fed to the background list cleaner."""
+    with _LOCK, _conn() as c:
+        return [(r["id"], r["email"]) for r in c.execute(
+            "SELECT id,email FROM contacts WHERE status='active' AND verify_status='' "
+            "ORDER BY id LIMIT ?", (limit,))]
 
 
 def logged_contacts_of(cid):
