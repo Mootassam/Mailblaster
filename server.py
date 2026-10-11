@@ -46,7 +46,7 @@ except Exception:  # running from source without the helper
 if os.environ.get("MB_DB"):          # alternate database (testing / multiple workspaces)
     store.set_db_path(os.environ["MB_DB"])
 
-VERSION = "3.2.0"
+VERSION = "3.2.1"
 app = Flask(__name__, static_folder=_STATIC)
 app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024
 # store.init() + the background threads start in _boot(), after the single-instance check:
